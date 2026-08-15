@@ -1,0 +1,25 @@
+# 临时 pod，用来往 PVC 里拷数据 / 把训练好的权重拷回本地。
+#   kubectl apply -f k8s/data-shell.yaml
+#   kubectl cp data/train.jsonl data-shell:/data/train.jsonl
+#   kubectl cp data-shell:/data/runs/qwen-sft ./qwen-sft
+#   kubectl delete pod data-shell        # ← 用完立刻删，NRP 不允许长期挂空闲 pod
+apiVersion: v1
+kind: Pod
+metadata:
+  name: data-shell
+spec:
+  containers:
+    - name: shell
+      image: alpine:3.20
+      command: ["sh", "-c", "sleep 14400"]   # 4 小时后自动退出，别改成 sleep infinity
+      resources:
+        requests: {cpu: "1", memory: 2Gi}
+        limits: {cpu: "2", memory: 4Gi}
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: qwen-sft-data
+  restartPolicy: Never

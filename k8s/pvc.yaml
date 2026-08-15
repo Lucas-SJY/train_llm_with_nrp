@@ -1,0 +1,14 @@
+# 存放 HF 模型缓存 + checkpoint。容器重启后数据只有放在 PVC 里才会留下来。
+# 提交前先看看你所在集群有哪些 storage class：kubectl get storageclass
+# CephFS 支持 ReadWriteMany（多节点训练必须），大文件读写性能也更好。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: qwen-sft-data
+spec:
+  storageClassName: rook-cephfs
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 300Gi

@@ -1,0 +1,28 @@
+# ---- 数据与产物（不进 git）----
+bespoke-v2/
+data/
+outputs/
+runs/
+*.jsonl
+*.zip
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.ipynb_checkpoints/
+
+# ---- 训练 / 模型 ----
+*.safetensors
+*.bin
+*.pt
+*.ckpt
+wandb/
+
+# ---- 本地环境 ----
+.env
+.DS_Store
+kubeconfig
+*.local.yaml

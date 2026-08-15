@@ -1,0 +1,7 @@
+# torch / CUDA 由基础镜像提供，这里不要再装 torch
+# transformers 需要 >=4.56（from_pretrained 的 dtype= 参数在此版本后才是正式名字）
+transformers>=4.56,<6
+datasets>=3.0.0
+accelerate>=1.0.0
+deepspeed>=0.15.0
+sentencepiece>=0.2.0

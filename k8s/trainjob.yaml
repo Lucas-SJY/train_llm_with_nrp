@@ -1,0 +1,49 @@
+# 可选：Kubeflow Trainer v2（TrainJob CRD）。NRP 目前文档里给的是 v1 的
+# TFJob/PyTorchJob，v2 不一定装了。先确认：
+#   kubectl get crd | grep trainjob
+#   kubectl get clustertrainingruntime
+# 有 torch-distributed 这个 runtime 才能用下面这份。
+#
+# 注意：v2 的 spec.trainer 里不能直接写 volumeMounts，挂 PVC 要通过 runtimePatches
+# 往 pod 上加 volumes，或者由集群管理员在 ClusterTrainingRuntime 里配好。
+# 所以这份只适合「输出直接推回 HF / S3」的场景，默认路径请用 pytorchjob.yaml。
+apiVersion: trainer.kubeflow.org/v1alpha1
+kind: TrainJob
+metadata:
+  name: qwen-sft
+spec:
+  runtimeRef:
+    apiGroup: trainer.kubeflow.org
+    kind: ClusterTrainingRuntime
+    name: torch-distributed
+  trainer:
+    image: gitlab-registry.nrp-nautilus.io/YOUR_USER/context-comp-sft:latest
+    numNodes: 1
+    numProcPerNode: 4
+    command:
+      - bash
+      - /workspace/src/entrypoint.sh
+      - --model
+      - Qwen/Qwen3-8B
+      - --train-file
+      - /workspace/data/train.jsonl
+      - --output-dir
+      - /workspace/runs/qwen-sft
+      - --max-seq-len
+      - "4096"
+      - --epochs
+      - "2"
+    env:
+      - name: HF_HOME
+        value: /workspace/.cache/huggingface
+      - name: PYTORCH_CUDA_ALLOC_CONF
+        value: expandable_segments:True
+    resourcesPerNode:
+      requests:
+        nvidia.com/a40: 4
+        cpu: "12"
+        memory: 128Gi
+      limits:
+        nvidia.com/a40: 4
+        cpu: "16"
+        memory: 128Gi

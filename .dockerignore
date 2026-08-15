@@ -1,0 +1,10 @@
+bespoke-v2/
+outputs/
+runs/
+.git/
+.venv/
+__pycache__/
+**/__pycache__/
+*.zip
+.DS_Store
+README.md
