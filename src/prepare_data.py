@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""把 bespoke-v2 的 span 标注转成 SFT 数据（messages 格式）。
+"""Convert the bespoke-v2 span annotations into an SFT dataset (messages format).
 
-每个样本原本是一条被切成若干 span 的推理轨迹，每个 span 带一个标签
-（logical_deduction / reflecting / verifying / ...）。这里的 SFT 目标是：
+Each raw sample is one reasoning trace cut into spans, and every span carries a
+label (logical_deduction / reflecting / verifying / ...). The SFT objective built
+here is:
 
-    输入 = question
-    输出 = 只保留“该保留的标签”的推理轨迹（即压缩后的 CoT）
+    input  = question
+    output = the reasoning trace with the dropped labels removed (compressed CoT)
 
---drop-labels 控制丢掉哪些标签，默认丢掉冗余度最高的四类。
-传 --drop-labels ""（空串）就是不压缩的 baseline（保留完整轨迹）。
+--drop-labels controls which labels are removed; the default drops the four most
+redundant ones. Pass --drop-labels "" (empty string) for the uncompressed
+baseline that keeps the full trace.
 """
 
 from __future__ import annotations
@@ -23,18 +25,18 @@ DEFAULT_DROP = "planning_next_step,restating_problem,reflecting,verifying"
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--input-dir", default="bespoke-v2", help="存放 sample_*.json 的目录")
-    p.add_argument("--output-dir", default="data", help="输出 train.jsonl / val.jsonl 的目录")
-    p.add_argument("--drop-labels", default=DEFAULT_DROP, help="逗号分隔，需要丢弃的 span 标签")
-    p.add_argument("--val-ratio", type=float, default=0.02, help="验证集比例")
-    p.add_argument("--max-samples", type=int, default=0, help="只取前 N 条，0 表示全部（调试用）")
-    p.add_argument("--min-target-tokens", type=int, default=32, help="压缩后太短的样本直接丢掉")
+    p.add_argument("--input-dir", default="bespoke-v2", help="directory holding sample_*.json")
+    p.add_argument("--output-dir", default="data", help="where train.jsonl / val.jsonl are written")
+    p.add_argument("--drop-labels", default=DEFAULT_DROP, help="comma-separated span labels to drop")
+    p.add_argument("--val-ratio", type=float, default=0.02, help="fraction held out for validation")
+    p.add_argument("--max-samples", type=int, default=0, help="only take the first N files, 0 means all")
+    p.add_argument("--min-target-tokens", type=int, default=32, help="drop samples whose target is too short")
     p.add_argument("--seed", type=int, default=42)
     return p.parse_args()
 
 
 def build_example(sample: dict, drop: set[str]) -> tuple[dict, int, int] | None:
-    """返回 (messages 样本, 原始 token 数, 保留 token 数)。不可用时返回 None。"""
+    """Return (messages example, original token count, kept token count), or None if unusable."""
     question = (sample.get("question") or "").strip()
     spans = sample.get("spans") or []
     if not question or not spans:
@@ -48,7 +50,8 @@ def build_example(sample: dict, drop: set[str]) -> tuple[dict, int, int] | None:
         kept.append(text)
         kept_tokens += int(span.get("token_count") or 0)
 
-    # 兜底：最终答案（通常是最后一个 span）必须在，否则这条样本没有监督信号
+    # Safety net: the final answer (usually the last span) must survive, otherwise
+    # the sample carries no useful supervision signal.
     last = (spans[-1].get("text") or "").strip()
     if last and (not kept or kept[-1] != last):
         kept.append(last)
@@ -75,7 +78,7 @@ def main() -> None:
 
     files = sorted(Path(args.input_dir).glob("sample_*.json"))
     if not files:
-        raise SystemExit(f"在 {args.input_dir} 下没找到 sample_*.json")
+        raise SystemExit(f"no sample_*.json found under {args.input_dir}")
     if args.max_samples:
         files = files[: args.max_samples]
 
@@ -112,10 +115,10 @@ def main() -> None:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     ratio = kept_total / orig_total if orig_total else 0.0
-    print(f"输入文件      : {len(files)}（跳过 {skipped}）")
-    print(f"train / val   : {len(train)} / {len(val)}  -> {out_dir}/")
-    print(f"丢弃的标签    : {sorted(drop) or '（无，保留完整轨迹）'}")
-    print(f"保留 token 占比: {ratio:.1%}（{kept_total:,} / {orig_total:,}）")
+    print(f"input files    : {len(files)} ({skipped} skipped)")
+    print(f"train / val    : {len(train)} / {len(val)}  -> {out_dir}/")
+    print(f"dropped labels : {sorted(drop) or '(none, full trace kept)'}")
+    print(f"tokens kept    : {ratio:.1%} ({kept_total:,} / {orig_total:,})")
 
 
 if __name__ == "__main__":

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""最小可用的 SFT：HF Trainer + DeepSpeed ZeRO-3，只对 assistant 部分算 loss。
+"""Minimal SFT run: HF Trainer + DeepSpeed ZeRO-3, loss on the assistant turn only.
 
-由 src/entrypoint.sh 里的 torchrun 启动，不要直接 python 跑多卡。
+Launched by torchrun from src/entrypoint.sh -- do not run this directly for
+multi-GPU training.
 """
 
 import argparse
@@ -22,13 +23,13 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--model", default=os.environ.get("MODEL_NAME", "Qwen/Qwen3-8B"))
     p.add_argument("--train-file", default="/workspace/data/train.jsonl")
-    p.add_argument("--eval-file", default="", help="留空则不做验证")
+    p.add_argument("--eval-file", default="", help="leave empty to skip evaluation")
     p.add_argument("--output-dir", default=os.environ.get("OUTPUT_DIR", "/data/runs/qwen-sft"))
     p.add_argument("--deepspeed", default="/workspace/configs/ds_zero3.json")
     p.add_argument("--max-seq-len", type=int, default=4096)
     p.add_argument("--epochs", type=float, default=2.0)
     p.add_argument("--lr", type=float, default=1e-5)
-    p.add_argument("--micro-batch-size", type=int, default=1, help="每张卡的 batch size")
+    p.add_argument("--micro-batch-size", type=int, default=1, help="per-GPU batch size")
     p.add_argument("--grad-accum", type=int, default=8)
     p.add_argument("--warmup-ratio", type=float, default=0.03)
     p.add_argument("--logging-steps", type=int, default=10)
@@ -40,7 +41,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def build_encoder(tokenizer, max_seq_len: int):
-    """把一条 messages 编码成 input_ids/labels，prompt 部分的 label 置为 -100。"""
+    """Encode one messages record into input_ids/labels, masking the prompt with -100."""
 
     def encode(example):
         messages = example["messages"]
@@ -51,7 +52,7 @@ def build_encoder(tokenizer, max_seq_len: int):
             prompt_messages,
             tokenize=False,
             add_generation_prompt=True,
-            enable_thinking=False,  # 模板不认这个参数时会被忽略
+            enable_thinking=False,  # ignored by templates that do not know this flag
         )
         prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
         answer_ids = tokenizer(answer, add_special_tokens=False)["input_ids"]
@@ -66,7 +67,7 @@ def build_encoder(tokenizer, max_seq_len: int):
 
 
 class Collator:
-    """右侧 padding，labels 用 -100 填充。"""
+    """Right-side padding; labels are padded with -100."""
 
     def __init__(self, pad_token_id: int):
         self.pad_token_id = pad_token_id
@@ -101,7 +102,7 @@ def main() -> None:
 
     encode = build_encoder(tokenizer, args.max_seq_len)
     tokenized = raw.map(encode, remove_columns=raw["train"].column_names, num_proc=args.num_workers)
-    # 全是 -100 的样本（prompt 已经吃满 max_seq_len）没有梯度，直接扔掉
+    # Records that are all -100 (prompt alone fills max_seq_len) produce no gradient.
     tokenized = tokenized.filter(lambda ex: any(x != -100 for x in ex["labels"]))
 
     model = AutoModelForCausalLM.from_pretrained(
@@ -110,7 +111,7 @@ def main() -> None:
         trust_remote_code=True,
         attn_implementation="sdpa",
     )
-    model.config.use_cache = False  # 与 gradient checkpointing 冲突
+    model.config.use_cache = False  # incompatible with gradient checkpointing
 
     training_args = TrainingArguments(
         output_dir=args.output_dir,
@@ -150,11 +151,12 @@ def main() -> None:
     ) if os.path.isdir(args.output_dir) else False
     trainer.train(resume_from_checkpoint=resume)
 
-    # ZeRO-3 下靠 ds_zero3.json 里的 stage3_gather_16bit_weights_on_model_save 汇总权重
+    # Under ZeRO-3 the sharded weights are consolidated thanks to
+    # stage3_gather_16bit_weights_on_model_save in ds_zero3.json.
     trainer.save_model(args.output_dir)
     if trainer.is_world_process_zero():
         tokenizer.save_pretrained(args.output_dir)
-    print(f"[done] 模型已保存到 {args.output_dir}")
+    print(f"[done] model saved to {args.output_dir}")
 
 
 if __name__ == "__main__":

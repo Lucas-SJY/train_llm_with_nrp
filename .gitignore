@@ -1,4 +1,4 @@
-# ---- 数据与产物（不进 git）----
+# ---- data and artifacts (never committed) ----
 bespoke-v2/
 data/
 outputs/
@@ -14,14 +14,14 @@ venv/
 *.egg-info/
 .ipynb_checkpoints/
 
-# ---- 训练 / 模型 ----
+# ---- training / models ----
 *.safetensors
 *.bin
 *.pt
 *.ckpt
 wandb/
 
-# ---- 本地环境 ----
+# ---- local environment ----
 .env
 .DS_Store
 kubeconfig

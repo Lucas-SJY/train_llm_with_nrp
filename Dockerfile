@@ -1,5 +1,5 @@
-# CUDA 12.6 的 devel 镜像：DeepSpeed 需要 nvcc 做 JIT 编译，runtime 镜像会失败。
-# 换 tag 前先确认 NRP 节点的驱动版本能带得动对应 CUDA。
+# CUDA 12.6 devel image: DeepSpeed needs nvcc for its JIT ops, the runtime image fails.
+# Before changing the tag, check that the NRP node drivers support the matching CUDA version.
 FROM pytorch/pytorch:2.9.1-cuda12.6-cudnn9-devel
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -17,8 +17,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY configs/ configs/
 COPY src/ src/
-# 训练数据（几十 MB）直接打进镜像，省掉一次往 PVC 拷数据的步骤。
-# 数据量大了以后改成挂 PVC，见 README「数据放 PVC」一节。
+# The training data (tens of MB) is baked into the image, which saves one copy
+# step to the PVC. Switch to a PVC mount once the dataset grows; see README.
 COPY data/ data/
 
 RUN chmod +x src/entrypoint.sh

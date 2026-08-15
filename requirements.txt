@@ -1,5 +1,6 @@
-# torch / CUDA 由基础镜像提供，这里不要再装 torch
-# transformers 需要 >=4.56（from_pretrained 的 dtype= 参数在此版本后才是正式名字）
+# torch / CUDA come from the base image -- do not install torch here.
+# transformers >=4.56 is required: from_pretrained's dtype= argument is only
+# the canonical name from that version on.
 transformers>=4.56,<6
 datasets>=3.0.0
 accelerate>=1.0.0

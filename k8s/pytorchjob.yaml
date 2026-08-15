@@ -1,18 +1,18 @@
-# Kubeflow Training Operator v1（NRP 上装的就是这个版本）
-# 提交： kubectl apply -f k8s/pytorchjob.yaml
-# 状态： kubectl get pytorchjob qwen-sft
-# 日志： kubectl logs -f qwen-sft-master-0
-# 删除： kubectl delete pytorchjob qwen-sft
+# Kubeflow Training Operator v1 (this is the version installed on NRP).
+# Submit: kubectl apply -f k8s/pytorchjob.yaml
+# Status: kubectl get pytorchjob qwen-sft
+# Logs:   kubectl logs -f qwen-sft-master-0
+# Delete: kubectl delete pytorchjob qwen-sft
 #
-# 默认配置：单节点 4×A40（48G），Qwen 8B 全参 SFT + ZeRO-3，不做 offload。
-# 改镜像 image: 那一行成你自己推上去的地址。
+# Default setup: single node, 4x A40 (48G), full-parameter SFT of an 8B model with
+# ZeRO-3 and no offload. Point image: at whatever you pushed.
 apiVersion: kubeflow.org/v1
 kind: PyTorchJob
 metadata:
   name: qwen-sft
 spec:
   runPolicy:
-    cleanPodPolicy: None      # 跑完保留 pod，方便看日志
+    cleanPodPolicy: None      # keep pods after completion so logs stay readable
     backoffLimit: 3
   pytorchReplicaSpecs:
     Master:
@@ -45,18 +45,18 @@ spec:
                 - --lr
                 - "1e-5"
               env:
-                # ← 换成你要训的那个 checkpoint 的准确 HF repo id
+                # Replace with the exact HF repo id of the checkpoint you want to train.
                 - name: MODEL_NAME
                   value: Qwen/Qwen3-8B
                 - name: OUTPUT_DIR
                   value: /data/runs/qwen-sft
-                - name: HF_HOME              # 模型缓存写到 PVC，别写进容器盘
+                - name: HF_HOME              # cache models on the PVC, not on the container disk
                   value: /data/hf
                 - name: NCCL_DEBUG
                   value: WARN
                 - name: PYTORCH_CUDA_ALLOC_CONF
                   value: expandable_segments:True
-                # 私有 / gated 模型才需要，先建 secret：
+                # Only needed for private / gated models. Create the secret first:
                 # kubectl create secret generic hf-token --from-literal=token=hf_xxx
                 # - name: HF_TOKEN
                 #   valueFrom:
@@ -75,7 +75,7 @@ spec:
               volumeMounts:
                 - name: data
                   mountPath: /data
-                - name: dshm            # NCCL/dataloader 需要，默认 64MB 会挂
+                - name: dshm            # NCCL and the dataloader need this; the 64MB default hangs
                   mountPath: /dev/shm
           volumes:
             - name: data
@@ -86,8 +86,8 @@ spec:
                 medium: Memory
                 sizeLimit: 16Gi
 
-    # ---- 多节点：把下面整段取消注释，replicas = 总节点数 - 1 ----
-    # 每个 pod 的 GPU 数保持一致，entrypoint.sh 会自动组 rendezvous。
+    # ---- Multi-node: uncomment the block below, replicas = total nodes - 1 ----
+    # Keep the GPU count identical across pods; entrypoint.sh handles the rendezvous.
     # Worker:
     #   replicas: 1
     #   restartPolicy: OnFailure
@@ -98,8 +98,8 @@ spec:
     #           image: gitlab-registry.nrp-nautilus.io/YOUR_USER/context-comp-sft:latest
     #           imagePullPolicy: Always
     #           command: ["bash", "/workspace/src/entrypoint.sh"]
-    #           args: [...]   # 与 Master 完全一致
-    #           env: [...]    # 与 Master 完全一致
+    #           args: [...]   # identical to Master
+    #           env: [...]    # identical to Master
     #           resources:
     #             requests: {nvidia.com/a40: 4, cpu: "12", memory: 128Gi, ephemeral-storage: 20Gi}
     #             limits:   {nvidia.com/a40: 4, cpu: "16", memory: 128Gi, ephemeral-storage: 20Gi}

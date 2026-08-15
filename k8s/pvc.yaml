@@ -1,6 +1,7 @@
-# 存放 HF 模型缓存 + checkpoint。容器重启后数据只有放在 PVC 里才会留下来。
-# 提交前先看看你所在集群有哪些 storage class：kubectl get storageclass
-# CephFS 支持 ReadWriteMany（多节点训练必须），大文件读写性能也更好。
+# Holds the HF model cache and the checkpoints. Anything not written to a PVC is
+# lost when the container restarts.
+# Check which storage classes your cluster offers first: kubectl get storageclass
+# CephFS supports ReadWriteMany (required for multi-node) and is faster on large files.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
