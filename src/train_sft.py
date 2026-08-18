@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal SFT run: HF Trainer + DeepSpeed ZeRO-3, loss on the assistant turn only.
+"""Minimal SFT run: HF Trainer + DeepSpeed, loss on the assistant turn only.
 
 Launched by torchrun from src/entrypoint.sh -- do not run this directly for
 multi-GPU training.
@@ -19,24 +19,37 @@ from transformers import (
 )
 
 
+def env(key: str, default):
+    """Read a default from the environment (.env / k8s Secret), keeping the type."""
+    raw = os.environ.get(key, "")
+    if raw == "":
+        return default
+    if isinstance(default, bool):
+        return raw.lower() in ("1", "true", "yes")
+    return type(default)(raw) if default is not None else raw
+
+
 def parse_args() -> argparse.Namespace:
+    # Every default comes from an env var, so the whole run is configured through
+    # .env locally and through the sft-env Secret on the cluster. CLI flags still win.
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--model", default=os.environ.get("MODEL_NAME", "Qwen/Qwen3-8B"))
-    p.add_argument("--train-file", default="/workspace/data/train.jsonl")
-    p.add_argument("--eval-file", default="", help="leave empty to skip evaluation")
-    p.add_argument("--output-dir", default=os.environ.get("OUTPUT_DIR", "/data/runs/qwen-sft"))
-    p.add_argument("--deepspeed", default="/workspace/configs/ds_zero3.json")
-    p.add_argument("--max-seq-len", type=int, default=4096)
-    p.add_argument("--epochs", type=float, default=2.0)
-    p.add_argument("--lr", type=float, default=1e-5)
-    p.add_argument("--micro-batch-size", type=int, default=1, help="per-GPU batch size")
-    p.add_argument("--grad-accum", type=int, default=8)
-    p.add_argument("--warmup-ratio", type=float, default=0.03)
-    p.add_argument("--logging-steps", type=int, default=10)
-    p.add_argument("--save-steps", type=int, default=500)
-    p.add_argument("--save-total-limit", type=int, default=2)
-    p.add_argument("--num-workers", type=int, default=4)
-    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--model", default=env("MODEL_NAME", "Qwen/Qwen3-1.7B"))
+    p.add_argument("--train-file", default=env("TRAIN_FILE", "/workspace/data/train.jsonl"))
+    p.add_argument("--eval-file", default=env("EVAL_FILE", ""), help="leave empty to skip evaluation")
+    p.add_argument("--output-dir", default=env("OUTPUT_DIR", "/data/runs/qwen-sft"))
+    p.add_argument("--deepspeed", default=env("DEEPSPEED_CONFIG", "/workspace/configs/ds.json"))
+    p.add_argument("--max-seq-len", type=int, default=env("MAX_SEQ_LEN", 4096))
+    p.add_argument("--epochs", type=float, default=env("EPOCHS", 2.0))
+    p.add_argument("--lr", type=float, default=env("LEARNING_RATE", 1e-5))
+    p.add_argument("--micro-batch-size", type=int, default=env("MICRO_BATCH_SIZE", 1), help="per-GPU batch size")
+    p.add_argument("--grad-accum", type=int, default=env("GRAD_ACCUM", 16))
+    p.add_argument("--warmup-ratio", type=float, default=env("WARMUP_RATIO", 0.03))
+    p.add_argument("--logging-steps", type=int, default=env("LOGGING_STEPS", 10))
+    p.add_argument("--save-steps", type=int, default=env("SAVE_STEPS", 500))
+    p.add_argument("--save-total-limit", type=int, default=env("SAVE_TOTAL_LIMIT", 2))
+    p.add_argument("--num-workers", type=int, default=env("NUM_WORKERS", 4))
+    p.add_argument("--seed", type=int, default=env("SEED", 42))
+    p.add_argument("--report-to", default=env("REPORT_TO", ""), help='e.g. "wandb", empty disables logging')
     return p.parse_args()
 
 
@@ -133,7 +146,7 @@ def main() -> None:
         deepspeed=args.deepspeed,
         dataloader_num_workers=args.num_workers,
         remove_unused_columns=False,
-        report_to=[],
+        report_to=[x for x in args.report_to.split(",") if x],
         seed=args.seed,
         ddp_timeout=3600,
     )
@@ -151,8 +164,6 @@ def main() -> None:
     ) if os.path.isdir(args.output_dir) else False
     trainer.train(resume_from_checkpoint=resume)
 
-    # Under ZeRO-3 the sharded weights are consolidated thanks to
-    # stage3_gather_16bit_weights_on_model_save in ds_zero3.json.
     trainer.save_model(args.output_dir)
     if trainer.is_world_process_zero():
         tokenizer.save_pretrained(args.output_dir)

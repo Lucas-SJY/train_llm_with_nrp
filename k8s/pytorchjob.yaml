@@ -1,11 +1,21 @@
 # Kubeflow Training Operator v1 (this is the version installed on NRP).
-# Submit: kubectl apply -f k8s/pytorchjob.yaml
+#
+# Create the config Secret from .env first, then submit:
+#   kubectl create secret generic sft-env --from-env-file=.env
+#   kubectl apply -f k8s/pytorchjob.yaml
 # Status: kubectl get pytorchjob qwen-sft
 # Logs:   kubectl logs -f qwen-sft-master-0
 # Delete: kubectl delete pytorchjob qwen-sft
 #
-# Default setup: single node, 4x A40 (48G), full-parameter SFT of an 8B model with
-# ZeRO-3 and no offload. Point image: at whatever you pushed.
+# All model / training / key settings come from the sft-env Secret via envFrom,
+# so this file only describes the hardware. Edit .env, re-create the secret,
+# resubmit. Note that $(VAR) substitution in args does NOT see envFrom values,
+# which is why there are no args here -- train_sft.py reads the env directly.
+#
+# Default setup: single node, 2x A40 (48G), full-parameter SFT of Qwen3-1.7B with
+# plain DeepSpeed (ZeRO stage 0 = data parallel, every GPU holds a full copy).
+# Bigger models do NOT fit at stage 0: an 8B model needs ~128GB per GPU for
+# weights + grads + Adam states. See the memory table in the README.
 apiVersion: kubeflow.org/v1
 kind: PyTorchJob
 metadata:
@@ -22,55 +32,23 @@ spec:
         spec:
           containers:
             - name: pytorch
+              # Same value as IMAGE in .env; k8s cannot read .env for this field.
               image: gitlab-registry.nrp-nautilus.io/YOUR_USER/context-comp-sft:latest
               imagePullPolicy: Always
               command: ["bash", "/workspace/src/entrypoint.sh"]
-              args:
-                - --model
-                - $(MODEL_NAME)
-                - --train-file
-                - /workspace/data/train.jsonl
-                - --eval-file
-                - /workspace/data/val.jsonl
-                - --output-dir
-                - $(OUTPUT_DIR)
-                - --max-seq-len
-                - "4096"
-                - --epochs
-                - "2"
-                - --micro-batch-size
-                - "1"
-                - --grad-accum
-                - "8"
-                - --lr
-                - "1e-5"
-              env:
-                # Replace with the exact HF repo id of the checkpoint you want to train.
-                - name: MODEL_NAME
-                  value: Qwen/Qwen3-8B
-                - name: OUTPUT_DIR
-                  value: /data/runs/qwen-sft
-                - name: HF_HOME              # cache models on the PVC, not on the container disk
-                  value: /data/hf
-                - name: NCCL_DEBUG
-                  value: WARN
-                - name: PYTORCH_CUDA_ALLOC_CONF
-                  value: expandable_segments:True
-                # Only needed for private / gated models. Create the secret first:
-                # kubectl create secret generic hf-token --from-literal=token=hf_xxx
-                # - name: HF_TOKEN
-                #   valueFrom:
-                #     secretKeyRef: {name: hf-token, key: token}
+              envFrom:
+                - secretRef:
+                    name: sft-env
               resources:
                 requests:
-                  nvidia.com/a40: 4
-                  cpu: "12"
-                  memory: 128Gi
+                  nvidia.com/a40: 2
+                  cpu: "8"
+                  memory: 64Gi
                   ephemeral-storage: 20Gi
                 limits:
-                  nvidia.com/a40: 4
-                  cpu: "16"
-                  memory: 128Gi
+                  nvidia.com/a40: 2
+                  cpu: "12"
+                  memory: 64Gi
                   ephemeral-storage: 20Gi
               volumeMounts:
                 - name: data
@@ -84,10 +62,12 @@ spec:
             - name: dshm
               emptyDir:
                 medium: Memory
-                sizeLimit: 16Gi
+                sizeLimit: 8Gi
 
     # ---- Multi-node: uncomment the block below, replicas = total nodes - 1 ----
     # Keep the GPU count identical across pods; entrypoint.sh handles the rendezvous.
+    # Note that stage 0 replicates the model on every GPU, so extra nodes buy
+    # throughput, not capacity for a larger model.
     # Worker:
     #   replicas: 1
     #   restartPolicy: OnFailure
@@ -98,11 +78,11 @@ spec:
     #           image: gitlab-registry.nrp-nautilus.io/YOUR_USER/context-comp-sft:latest
     #           imagePullPolicy: Always
     #           command: ["bash", "/workspace/src/entrypoint.sh"]
-    #           args: [...]   # identical to Master
-    #           env: [...]    # identical to Master
+    #           envFrom:
+    #             - secretRef: {name: sft-env}
     #           resources:
-    #             requests: {nvidia.com/a40: 4, cpu: "12", memory: 128Gi, ephemeral-storage: 20Gi}
-    #             limits:   {nvidia.com/a40: 4, cpu: "16", memory: 128Gi, ephemeral-storage: 20Gi}
+    #             requests: {nvidia.com/a40: 2, cpu: "8", memory: 64Gi, ephemeral-storage: 20Gi}
+    #             limits:   {nvidia.com/a40: 2, cpu: "12", memory: 64Gi, ephemeral-storage: 20Gi}
     #           volumeMounts:
     #             - {name: data, mountPath: /data}
     #             - {name: dshm, mountPath: /dev/shm}
@@ -110,4 +90,4 @@ spec:
     #         - name: data
     #           persistentVolumeClaim: {claimName: qwen-sft-data}
     #         - name: dshm
-    #           emptyDir: {medium: Memory, sizeLimit: 16Gi}
+    #           emptyDir: {medium: Memory, sizeLimit: 8Gi}

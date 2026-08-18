@@ -8,3 +8,6 @@ __pycache__/
 *.zip
 .DS_Store
 README.md
+# Secrets never go into the image; they arrive as the sft-env Secret at runtime.
+.env
+.env.*

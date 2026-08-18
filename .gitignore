@@ -22,7 +22,10 @@ venv/
 wandb/
 
 # ---- local environment ----
+# Secrets live in .env; only the placeholder template is tracked.
 .env
+.env.*
+!.env.example
 .DS_Store
 kubeconfig
 *.local.yaml
