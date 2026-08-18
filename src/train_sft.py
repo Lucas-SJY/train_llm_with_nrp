@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Minimal SFT run: HF Trainer + DeepSpeed, loss on the assistant turn only.
 
-Launched by torchrun from src/entrypoint.sh -- do not run this directly for
-multi-GPU training.
+Single node, single GPU. Launched through src/entrypoint.sh, which calls
+`deepspeed --num_gpus=1` so DeepSpeed gets the distributed group it expects.
 """
 
 import argparse
@@ -42,7 +42,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--epochs", type=float, default=env("EPOCHS", 2.0))
     p.add_argument("--lr", type=float, default=env("LEARNING_RATE", 1e-5))
     p.add_argument("--micro-batch-size", type=int, default=env("MICRO_BATCH_SIZE", 1), help="per-GPU batch size")
-    p.add_argument("--grad-accum", type=int, default=env("GRAD_ACCUM", 16))
+    p.add_argument("--grad-accum", type=int, default=env("GRAD_ACCUM", 32))
     p.add_argument("--warmup-ratio", type=float, default=env("WARMUP_RATIO", 0.03))
     p.add_argument("--logging-steps", type=int, default=env("LOGGING_STEPS", 10))
     p.add_argument("--save-steps", type=int, default=env("SAVE_STEPS", 500))
@@ -50,6 +50,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--num-workers", type=int, default=env("NUM_WORKERS", 4))
     p.add_argument("--seed", type=int, default=env("SEED", 42))
     p.add_argument("--report-to", default=env("REPORT_TO", ""), help='e.g. "wandb", empty disables logging')
+    # The deepspeed launcher appends this to the script's argv; accept it silently.
+    p.add_argument("--local_rank", type=int, default=-1, help=argparse.SUPPRESS)
     return p.parse_args()
 
 

@@ -1,0 +1,58 @@
+# Plain Kubernetes Job: one pod, one GPU. No Kubeflow operator involved.
+# NRP recommends Jobs over bare pods for any computation.
+#
+# Do not apply this file by hand -- ./run.sh renders ${IMAGE} and creates the two
+# Secrets it depends on:
+#   ./run.sh submit     just (re)submit
+#   ./run.sh            data + image + secrets + submit + logs
+#
+# Model, hyperparameters and keys all arrive through the sft-env Secret (envFrom),
+# so this file only describes the hardware.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: qwen-sft
+spec:
+  backoffLimit: 2            # retry twice if the pod dies
+  ttlSecondsAfterFinished: 604800   # clean up a week after it finishes
+  template:
+    spec:
+      restartPolicy: Never
+      # Private NRP registry: created by run.sh from NRP_REGISTRY_TOKEN.
+      imagePullSecrets:
+        - name: nrp-registry
+      containers:
+        - name: trainer
+          # Placeholder: run.sh substitutes IMAGE from .env before applying.
+          image: ${IMAGE}
+          imagePullPolicy: Always
+          command: ["bash", "/workspace/src/entrypoint.sh"]
+          envFrom:
+            - secretRef:
+                name: sft-env
+          # NRP policy: the cpu limit/request ratio may not exceed 1.2, and GPU
+          # requests and limits must be equal. Keeping everything equal is simplest.
+          resources:
+            requests:
+              nvidia.com/a40: 1
+              cpu: "8"
+              memory: 48Gi
+              ephemeral-storage: 20Gi
+            limits:
+              nvidia.com/a40: 1
+              cpu: "8"
+              memory: 48Gi
+              ephemeral-storage: 20Gi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: dshm      # the 64MB default is too small for the dataloader
+              mountPath: /dev/shm
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: qwen-sft-data
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi

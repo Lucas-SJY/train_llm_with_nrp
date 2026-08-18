@@ -5,7 +5,7 @@
 #   ./run.sh data         only rebuild data/{train,val}.jsonl
 #   ./run.sh image        only docker login + build + push
 #   ./run.sh secrets      only refresh the sft-env and nrp-registry Secrets
-#   ./run.sh submit       only (re)submit the PyTorchJob
+#   ./run.sh submit       only (re)submit the Job
 #   ./run.sh logs         follow the current job's logs
 #   ./run.sh status       job, pods and recent events
 #   ./run.sh clean        delete the job (Secrets and PVC are kept)
@@ -87,35 +87,49 @@ step_pvc() {
 }
 
 step_submit() {
-  log "Submitting PyTorchJob ${JOB_NAME}"
-  "${KUBECTL[@]}" delete pytorchjob "${JOB_NAME}" --ignore-not-found
+  log "Submitting Job ${JOB_NAME}"
+  # A Job's pod template is immutable, so an existing Job has to go first.
+  "${KUBECTL[@]}" delete job "${JOB_NAME}" --ignore-not-found
   # The manifest carries an ${IMAGE} placeholder; k8s cannot read .env itself.
-  sed "s|\${IMAGE}|${IMAGE}|g" k8s/pytorchjob.yaml | "${KUBECTL[@]}" apply -f -
+  sed "s|\${IMAGE}|${IMAGE}|g" k8s/job.yaml | "${KUBECTL[@]}" apply -f -
+}
+
+job_pod() {
+  "${KUBECTL[@]}" get pods -l "job-name=${JOB_NAME}" \
+    -o jsonpath='{.items[-1:].metadata.name}' 2>/dev/null || true
 }
 
 step_logs() {
-  log "Waiting for pod ${JOB_NAME}-master-0"
-  for _ in $(seq 1 60); do
-    phase="$("${KUBECTL[@]}" get pod "${JOB_NAME}-master-0" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
-    case "${phase}" in
-      Running | Succeeded | Failed) break ;;
-    esac
+  log "Waiting for the ${JOB_NAME} pod to start"
+  pod=""
+  for _ in $(seq 1 120); do
+    pod="$(job_pod)"
+    if [ -n "${pod}" ]; then
+      phase="$("${KUBECTL[@]}" get pod "${pod}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+      case "${phase}" in
+        Running | Succeeded | Failed) break ;;
+      esac
+    fi
     printf '.'
     sleep 5
   done
   echo
-  "${KUBECTL[@]}" logs -f "${JOB_NAME}-master-0"
+  if [ -z "${pod}" ]; then
+    echo "no pod yet; check './run.sh status'" >&2
+    exit 1
+  fi
+  "${KUBECTL[@]}" logs -f "${pod}"
 }
 
 step_status() {
-  "${KUBECTL[@]}" get pytorchjob "${JOB_NAME}" || true
-  "${KUBECTL[@]}" get pods -l "training.kubeflow.org/job-name=${JOB_NAME}" || true
+  "${KUBECTL[@]}" get job "${JOB_NAME}" || true
+  "${KUBECTL[@]}" get pods -l "job-name=${JOB_NAME}" || true
   "${KUBECTL[@]}" get events --sort-by=.lastTimestamp | tail -15 || true
 }
 
 step_clean() {
-  log "Deleting PyTorchJob ${JOB_NAME}"
-  "${KUBECTL[@]}" delete pytorchjob "${JOB_NAME}" --ignore-not-found
+  log "Deleting Job ${JOB_NAME}"
+  "${KUBECTL[@]}" delete job "${JOB_NAME}" --ignore-not-found
 }
 
 # ---------------------------------------------------------------------------

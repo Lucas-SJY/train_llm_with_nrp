@@ -1,13 +1,13 @@
 # Holds the HF model cache and the checkpoints. Anything not written to a PVC is
 # lost when the container restarts.
-# Check which storage classes your cluster offers first: kubectl get storageclass
-# CephFS supports ReadWriteMany (required for multi-node) and is faster on large files.
+# CephFS supports ReadWriteMany (required for multi-node) and is faster on large
+# files. Other options on this cluster: kubectl get storageclass
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: qwen-sft-data
 spec:
-  storageClassName: rook-cephfs
+  storageClassName: cephfs
   accessModes:
     - ReadWriteMany
   resources:
