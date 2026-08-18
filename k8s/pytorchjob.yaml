@@ -1,16 +1,15 @@
 # Kubeflow Training Operator v1 (this is the version installed on NRP).
 #
-# Create the config Secret from .env first, then submit:
-#   kubectl create secret generic sft-env --from-env-file=.env
-#   kubectl apply -f k8s/pytorchjob.yaml
-# Status: kubectl get pytorchjob qwen-sft
-# Logs:   kubectl logs -f qwen-sft-master-0
-# Delete: kubectl delete pytorchjob qwen-sft
+# Do not apply this file by hand -- ./run.sh renders ${IMAGE} and creates the two
+# Secrets it depends on:
+#   ./run.sh submit     build nothing, just (re)submit
+#   ./run.sh            data + image + secrets + submit + logs
 #
 # All model / training / key settings come from the sft-env Secret via envFrom,
-# so this file only describes the hardware. Edit .env, re-create the secret,
-# resubmit. Note that $(VAR) substitution in args does NOT see envFrom values,
-# which is why there are no args here -- train_sft.py reads the env directly.
+# so this file only describes the hardware. Edit .env, then `./run.sh secrets`
+# and `./run.sh submit`. Note that $(VAR) substitution in args does NOT see
+# envFrom values, which is why there are no args here -- train_sft.py reads the
+# environment directly.
 #
 # Default setup: single node, 2x A40 (48G), full-parameter SFT of Qwen3-1.7B with
 # plain DeepSpeed (ZeRO stage 0 = data parallel, every GPU holds a full copy).
@@ -30,10 +29,14 @@ spec:
       restartPolicy: OnFailure
       template:
         spec:
+          # Private NRP registry: created by run.sh from NRP_REGISTRY_TOKEN.
+          imagePullSecrets:
+            - name: nrp-registry
           containers:
             - name: pytorch
-              # Same value as IMAGE in .env; k8s cannot read .env for this field.
-              image: gitlab-registry.nrp-nautilus.io/YOUR_USER/context-comp-sft:latest
+              # Placeholder: run.sh substitutes IMAGE from .env before applying.
+              # Applying this file directly with kubectl leaves it unresolved.
+              image: ${IMAGE}
               imagePullPolicy: Always
               command: ["bash", "/workspace/src/entrypoint.sh"]
               envFrom:
@@ -73,9 +76,11 @@ spec:
     #   restartPolicy: OnFailure
     #   template:
     #     spec:
+    #       imagePullSecrets:
+    #         - name: nrp-registry
     #       containers:
     #         - name: pytorch
-    #           image: gitlab-registry.nrp-nautilus.io/YOUR_USER/context-comp-sft:latest
+    #           image: ${IMAGE}
     #           imagePullPolicy: Always
     #           command: ["bash", "/workspace/src/entrypoint.sh"]
     #           envFrom:

@@ -27,6 +27,7 @@ edit `build_example` in [prepare_data.py](src/prepare_data.py).
 │   ├── train_sft.py        # HF Trainer + DeepSpeed, loss on the assistant turn only
 │   └── entrypoint.sh       # turns the env vars injected by k8s into torchrun flags
 ├── configs/ds.json         # DeepSpeed, ZeRO stage 0 (data parallel only)
+├── run.sh                  # one-command pipeline: data -> image -> secrets -> job -> logs
 ├── .env.example            # every setting and key; copy to .env (gitignored)
 ├── k8s/
 │   ├── pvc.yaml            # HF cache + checkpoints
@@ -54,72 +55,52 @@ edit `build_example` in [prepare_data.py](src/prepare_data.py).
 
 ## Quick start
 
-### 0. Fill in .env
-
-Model choice, hyperparameters and every key live in one file. `.env` is gitignored;
-only the `.env.example` template is tracked.
-
 ```bash
 cp .env.example .env
-$EDITOR .env                 # MODEL_NAME, HF_TOKEN, IMAGE, ...
-set -a; . ./.env; set +a     # export them into the current shell
+$EDITOR .env      # fill in K8S_NAMESPACE, IMAGE, NRP_REGISTRY_TOKEN
+./run.sh
 ```
 
-`train_sft.py` reads all of its defaults from these variables, so nothing has to be
-passed on the command line. On the cluster the same file becomes a Secret (step 3).
+That is the whole thing. `run.sh` builds the dataset, logs in to the NRP registry,
+builds and pushes the image, refreshes both Secrets, creates the PVC if missing,
+submits the PyTorchJob, and tails the logs.
 
-### 1. Build the dataset (locally)
+Only three values are mandatory:
+
+| Variable | Where it comes from |
+|---|---|
+| `K8S_NAMESPACE` | the NRP namespace you were added to |
+| `IMAGE` | `gitlab-registry.nrp-nautilus.io/<your-gitlab-namespace>/context-comp-sft:latest` |
+| `NRP_REGISTRY_TOKEN` | a GitLab token with `read_registry` + `write_registry`, from https://gitlab.nrp-nautilus.io/-/user_settings/personal_access_tokens |
+
+`NRP_REGISTRY_USER` is derived from `IMAGE` -- the path segment after the host is your
+GitLab namespace, which is also the registry login user for a personal access token.
+Set it explicitly only for a deploy token, whose user is the token name.
+
+### Individual steps
 
 ```bash
-python3 src/prepare_data.py --input-dir bespoke-v2 --output-dir data
-# input files    : 5144 (0 skipped)
-# train / val    : 5042 / 102  -> data/
-# tokens kept    : 56.0% (4,712,631 / 8,412,626)
+./run.sh data       # rebuild data/{train,val}.jsonl only
+./run.sh image      # docker login + build + push
+./run.sh secrets    # re-upload .env as the sft-env Secret, refresh the pull secret
+./run.sh submit     # (re)submit the job, substituting ${IMAGE} into the manifest
+./run.sh logs       # wait for the master pod, then follow
+./run.sh status     # job, pods, recent events
+./run.sh clean      # delete the job (Secrets and PVC survive)
 ```
 
-Add `--max-samples 200` for a smoke test that finishes an epoch in under a minute.
+After editing `.env`, run `./run.sh secrets && ./run.sh submit` -- a running pod does
+not pick up changes, and the Secret is a snapshot.
 
-### 2. Build and push the image
+Before the first run, check that the storage class in `k8s/pvc.yaml` exists on your
+cluster (`kubectl get storageclass`). For a fast smoke test, shrink the dataset first
+with `python3 src/prepare_data.py --max-samples 200`.
 
-`data/` is baked into the image (25MB), so rebuild after changing the dataset. `.env`
-is excluded by `.dockerignore` -- keys never end up in an image layer.
+The first job downloads the model from HuggingFace into `/data/hf` on the PVC; later
+jobs hit that cache. `.env` is excluded by `.dockerignore`, so keys never end up in an
+image layer.
 
-```bash
-docker login gitlab-registry.nrp-nautilus.io
-docker build --platform linux/amd64 -t $IMAGE .
-docker push $IMAGE
-```
-
-Copy the same address into `image:` in `k8s/pytorchjob.yaml` (k8s cannot read `.env`
-for that field).
-
-### 3. Create the PVC
-
-```bash
-kubectl get storageclass                    # confirm what exists, then edit pvc.yaml
-kubectl apply -f k8s/pvc.yaml
-kubectl get pvc qwen-sft-data               # wait for Bound
-```
-
-### 4. Push .env to the cluster and submit
-
-The job pulls its entire configuration from a Secret built out of `.env`:
-
-```bash
-kubectl delete secret sft-env --ignore-not-found
-kubectl create secret generic sft-env --from-env-file=.env
-
-kubectl apply -f k8s/pytorchjob.yaml
-kubectl get pytorchjob qwen-sft
-kubectl get pods -l training.kubeflow.org/job-name=qwen-sft
-kubectl logs -f qwen-sft-master-0
-```
-
-Re-run the two secret commands after every `.env` edit; a running pod does not pick
-up changes. The first run downloads the model from HuggingFace into `/data/hf` on the
-PVC; later jobs hit that cache.
-
-### 5. Retrieve the weights
+### Retrieve the weights
 
 Checkpoints land in `/data/runs/qwen-sft` on the PVC:
 
@@ -127,7 +108,7 @@ Checkpoints land in `/data/runs/qwen-sft` on the PVC:
 kubectl apply -f k8s/data-shell.yaml
 kubectl cp data-shell:/data/runs/qwen-sft ./qwen-sft
 kubectl delete pod data-shell               # delete as soon as you are done
-kubectl delete pytorchjob qwen-sft
+./run.sh clean
 ```
 
 ## Configuration
@@ -138,7 +119,8 @@ kubectl delete pytorchjob qwen-sft
 |---|---|
 | `.env` | model, keys, all hyperparameters. Gitignored, never baked into the image. |
 | `.env.example` | the tracked template; keep it in sync when adding a variable. |
-| `k8s/pytorchjob.yaml` | hardware only: GPU type and count, cpu/memory, volumes, image. |
+| `run.sh` | the only entry point; reads `.env` and drives docker + kubectl. |
+| `k8s/pytorchjob.yaml` | hardware only: GPU type and count, cpu/memory, volumes. |
 | `configs/ds.json` | DeepSpeed config. |
 
 `src/train_sft.py` takes every default from an environment variable
@@ -255,9 +237,14 @@ handshake.
 `runtime` images cannot build the JIT ops.
 
 **Settings changed in .env but the job ignores them** -- the Secret is a snapshot. Run
-`kubectl delete secret sft-env && kubectl create secret generic sft-env --from-env-file=.env`,
-then resubmit the job. Check what the pod actually got with
+`./run.sh secrets && ./run.sh submit`. Check what the pod actually got with
 `kubectl exec qwen-sft-master-0 -- env | sort`.
+
+**ImagePullBackOff** -- either the `nrp-registry` Secret is stale (`./run.sh secrets`)
+or `NRP_REGISTRY_USER` is wrong. Confirm the token works locally first:
+`echo $NRP_REGISTRY_TOKEN | docker login gitlab-registry.nrp-nautilus.io -u $NRP_REGISTRY_USER --password-stdin`.
+A pod whose image is literally `${IMAGE}` means the manifest was applied with plain
+`kubectl` instead of `./run.sh submit`.
 
 ## References
 
