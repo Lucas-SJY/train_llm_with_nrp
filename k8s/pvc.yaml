@@ -1,15 +1,19 @@
 # Holds the HF model cache and the checkpoints. Anything not written to a PVC is
 # lost when the container restarts.
-# CephFS supports ReadWriteMany (required for multi-node) and is faster on large
-# files. Other options on this cluster: kubectl get storageclass
+#
+# rook-ceph-block is RBD: block storage, good with the many small files a HF cache
+# contains, and the class most volumes in this namespace already use. One pod at a
+# time, which is all a single-GPU Job needs. Switch to rook-cephfs with
+# ReadWriteMany if several pods ever have to mount this at once.
+# List what the cluster offers: kubectl get storageclass
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: qwen-sft-data
 spec:
-  storageClassName: cephfs
+  storageClassName: rook-ceph-block
   accessModes:
-    - ReadWriteMany
+    - ReadWriteOnce
   resources:
     requests:
-      storage: 300Gi
+      storage: 100Gi
