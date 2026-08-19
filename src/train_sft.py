@@ -43,7 +43,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--lr", type=float, default=env("LEARNING_RATE", 1e-5))
     p.add_argument("--micro-batch-size", type=int, default=env("MICRO_BATCH_SIZE", 1), help="per-GPU batch size")
     p.add_argument("--grad-accum", type=int, default=env("GRAD_ACCUM", 32))
-    p.add_argument("--warmup-ratio", type=float, default=env("WARMUP_RATIO", 0.03))
+    p.add_argument("--warmup-ratio", type=float, default=env("WARMUP_RATIO", 0.03),
+                   help="fraction of total steps spent warming up, e.g. 0.03")
     p.add_argument("--logging-steps", type=int, default=env("LOGGING_STEPS", 10))
     p.add_argument("--save-steps", type=int, default=env("SAVE_STEPS", 500))
     p.add_argument("--save-total-limit", type=int, default=env("SAVE_TOTAL_LIMIT", 2))
@@ -135,7 +136,9 @@ def main() -> None:
         num_train_epochs=args.epochs,
         learning_rate=args.lr,
         lr_scheduler_type="cosine",
-        warmup_ratio=args.warmup_ratio,
+        # transformers v5 dropped warmup_ratio: warmup_steps now takes either an
+        # int (exact steps) or a float in [0, 1) meaning a fraction of total steps.
+        warmup_steps=args.warmup_ratio,
         bf16=True,
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},

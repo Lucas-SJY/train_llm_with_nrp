@@ -8,6 +8,11 @@
 #
 # Model, hyperparameters and keys all arrive through the sft-env Secret (envFrom),
 # so this file only describes the hardware.
+#
+# GPU choice: A100 rather than A40. A40 exists on only 3 nodes (12 cards) and one of
+# them offers 2.5 cpu per GPU, so an 8-cpu request rarely fits -- that is what left
+# the first attempt Pending. A100 spans 25 nodes (93 cards) and this namespace has a
+# quota of 4. Check yours with `kubectl describe resourcequota`.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -21,6 +26,18 @@ spec:
       # Private NRP registry: created by run.sh from NRP_REGISTRY_TOKEN.
       imagePullSecrets:
         - name: nrp-registry
+      # The PVC lives in the UCSD Ceph cluster, so keep the pod in the same region:
+      # a cross-country RBD mount would make every checkpoint write crawl. us-west
+      # holds ~42 A100s (ucsd-nrp, fullerton, suncorridor). Drop this block if you
+      # would rather wait for any node in the country.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: topology.kubernetes.io/region
+                    operator: In
+                    values: ["us-west"]
       containers:
         - name: trainer
           # Placeholder: run.sh substitutes IMAGE from .env before applying.
@@ -34,12 +51,12 @@ spec:
           # requests and limits must be equal. Keeping everything equal is simplest.
           resources:
             requests:
-              nvidia.com/a40: 1
+              nvidia.com/a100: 1
               cpu: "8"
               memory: 48Gi
               ephemeral-storage: 20Gi
             limits:
-              nvidia.com/a40: 1
+              nvidia.com/a100: 1
               cpu: "8"
               memory: 48Gi
               ephemeral-storage: 20Gi

@@ -1,7 +1,7 @@
 # torch / CUDA come from the base image -- do not install torch here.
-# transformers >=4.56 is required: from_pretrained's dtype= argument is only
-# the canonical name from that version on.
-transformers>=4.56,<6
+# The code targets the transformers v5 API: from_pretrained(dtype=...) and
+# TrainingArguments(warmup_steps=<float ratio>), which replaced warmup_ratio.
+transformers>=5.15,<6
 datasets>=3.0.0
 accelerate>=1.0.0
 deepspeed>=0.15.0

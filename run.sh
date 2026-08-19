@@ -102,20 +102,38 @@ job_pod() {
 step_logs() {
   log "Waiting for the ${JOB_NAME} pod to start"
   pod=""
-  for _ in $(seq 1 120); do
+  last=""
+  for i in $(seq 1 120); do
     pod="$(job_pod)"
     if [ -n "${pod}" ]; then
       phase="$("${KUBECTL[@]}" get pod "${pod}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
       case "${phase}" in
         Running | Succeeded | Failed) break ;;
       esac
+      # Pending is where NRP jobs get stuck (no free GPU of that type, quota, PVC
+      # region). Surface the reason instead of printing anonymous dots.
+      reason="$("${KUBECTL[@]}" get pod "${pod}" \
+        -o jsonpath='{.status.conditions[?(@.type=="PodScheduled")].message}' 2>/dev/null || true)"
+      [ -z "${reason}" ] && reason="${phase}"
+      msg="${phase}: $(printf '%s' "${reason}" | cut -c1-150)"
+      if [ "${msg}" != "${last}" ]; then
+        printf '\n  [%3ds] %s\n' "$((i * 5))" "${msg}"
+        last="${msg}"
+      else
+        printf '.'
+      fi
     fi
-    printf '.'
     sleep 5
   done
   echo
   if [ -z "${pod}" ]; then
-    echo "no pod yet; check './run.sh status'" >&2
+    echo "no pod created; check './run.sh status'" >&2
+    exit 1
+  fi
+  phase="$("${KUBECTL[@]}" get pod "${pod}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+  if [ "${phase}" = "Pending" ]; then
+    echo "still Pending after 10 minutes. Full reason:" >&2
+    "${KUBECTL[@]}" describe pod "${pod}" | sed -n '/Events:/,$p' >&2
     exit 1
   fi
   "${KUBECTL[@]}" logs -f "${pod}"
