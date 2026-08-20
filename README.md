@@ -232,6 +232,21 @@ A pod whose image is literally `${IMAGE}` means the manifest was applied with pl
 **PVC stuck in Pending** -- the storage class in `k8s/pvc.yaml` must exist on the
 cluster; list them with `kubectl get storageclass`.
 
+**Pod is Running but no loss lines appear** -- check whether it is actually computing:
+
+```bash
+POD=$(kubectl get pods -l job-name=qwen-sft -o jsonpath='{.items[-1:].metadata.name}')
+kubectl exec $POD -- nvidia-smi --query-gpu=memory.used,utilization.gpu --format=csv
+kubectl exec $POD -- sh -c 'grep ^State /proc/115/status; cat /proc/115/wchan'
+```
+
+`utilization.gpu 0%` plus state `D` and wchan `folio_wait_bit_common` means the
+process is blocked on disk I/O, not training. The usual cause is an mmapped file on a
+PVC that was mounted from another region: `datasets` caches the tokenized arrow files
+under the HF cache, the dataloader reads them at random every step, and cross-region
+RBD serves those random reads at roughly 175KB/s. `HF_DATASETS_CACHE` points at local
+disk to avoid exactly this -- make sure it is not on the PVC.
+
 **DeepSpeed fails to compile** -- the base image must be a `devel` one with nvcc; the
 `runtime` images cannot build the JIT ops.
 

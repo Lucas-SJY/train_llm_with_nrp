@@ -51,6 +51,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--num-workers", type=int, default=env("NUM_WORKERS", 4))
     p.add_argument("--seed", type=int, default=env("SEED", 42))
     p.add_argument("--report-to", default=env("REPORT_TO", ""), help='e.g. "wandb", empty disables logging')
+    p.add_argument("--resume", default=env("RESUME", "auto"), choices=["auto", "no"],
+                   help="auto: continue from a checkpoint in --output-dir if one exists; no: ignore it")
     # The deepspeed launcher appends this to the script's argv; accept it silently.
     p.add_argument("--local_rank", type=int, default=-1, help=argparse.SUPPRESS)
     return p.parse_args()
@@ -120,6 +122,12 @@ def main() -> None:
     tokenized = raw.map(encode, remove_columns=raw["train"].column_names, num_proc=args.num_workers)
     # Records that are all -100 (prompt alone fills max_seq_len) produce no gradient.
     tokenized = tokenized.filter(lambda ex: any(x != -100 for x in ex["labels"]))
+    if len(tokenized["train"]) == 0:
+        raise SystemExit(
+            f"every training example was filtered out: with --max-seq-len {args.max_seq_len} "
+            "the prompt alone fills the window, leaving nothing to compute loss on. "
+            "Raise --max-seq-len or shorten the prompts."
+        )
 
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
@@ -164,10 +172,29 @@ def main() -> None:
         data_collator=Collator(tokenizer.pad_token_id),
     )
 
-    resume = any(
-        d.startswith("checkpoint-") for d in os.listdir(args.output_dir)
-    ) if os.path.isdir(args.output_dir) else False
-    trainer.train(resume_from_checkpoint=resume)
+    # Resuming matters on NRP, where a pod can be evicted mid-run, but it must be
+    # loud: a checkpoint whose global_step already equals max_steps makes train()
+    # return instantly with train_loss 0, which reads like a broken run.
+    ckpts = sorted(
+        (d for d in os.listdir(args.output_dir) if d.startswith("checkpoint-")),
+        key=lambda d: int(d.split("-")[-1]),
+    ) if os.path.isdir(args.output_dir) else []
+    if args.resume == "no":
+        resume = False
+        if ckpts:
+            print(f"[resume] ignoring {len(ckpts)} checkpoint(s) in {args.output_dir}, training from scratch")
+    else:
+        resume = bool(ckpts)
+        if resume:
+            print(f"[resume] continuing from {ckpts[-1]} (set RESUME=no to start over)")
+        else:
+            print(f"[resume] no checkpoint in {args.output_dir}, training from scratch")
+
+    result = trainer.train(resume_from_checkpoint=resume)
+    if result.global_step and result.metrics.get("train_runtime", 0) < 1:
+        print(f"[resume] nothing left to do: the checkpoint had already finished all "
+              f"{result.global_step} steps. Point OUTPUT_DIR somewhere new or set "
+              f"RESUME=no to train again.")
 
     trainer.save_model(args.output_dir)
     if trainer.is_world_process_zero():

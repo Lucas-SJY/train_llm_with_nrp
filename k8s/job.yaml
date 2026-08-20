@@ -26,18 +26,10 @@ spec:
       # Private NRP registry: created by run.sh from NRP_REGISTRY_TOKEN.
       imagePullSecrets:
         - name: nrp-registry
-      # The PVC lives in the UCSD Ceph cluster, so keep the pod in the same region:
-      # a cross-country RBD mount would make every checkpoint write crawl. us-west
-      # holds ~42 A100s (ucsd-nrp, fullerton, suncorridor). Drop this block if you
-      # would rather wait for any node in the country.
-      affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-              - matchExpressions:
-                  - key: topology.kubernetes.io/region
-                    operator: In
-                    values: ["us-west"]
+      # No region constraint: take any node in the country with a free A100. The PVC
+      # lives in the UCSD Ceph cluster, so a pod in us-central mounts it over the WAN
+      # and writes checkpoints more slowly -- an acceptable trade for not queueing
+      # behind the us-west A100s, which are usually all busy.
       containers:
         - name: trainer
           # Placeholder: run.sh substitutes IMAGE from .env before applying.
@@ -47,19 +39,23 @@ spec:
           envFrom:
             - secretRef:
                 name: sft-env
+          # Kept deliberately small so the pod fits wherever an A100 happens to be
+          # free: asking for 8 cpu was enough to be rejected by nodes that had a card
+          # available. The GPU is the bottleneck, not the host. HF cache and
+          # checkpoints go to the PVC, so container-local storage stays tiny.
           # NRP policy: the cpu limit/request ratio may not exceed 1.2, and GPU
           # requests and limits must be equal. Keeping everything equal is simplest.
           resources:
             requests:
               nvidia.com/a100: 1
-              cpu: "8"
-              memory: 48Gi
-              ephemeral-storage: 20Gi
+              cpu: "2"
+              memory: 32Gi
+              ephemeral-storage: 10Gi
             limits:
               nvidia.com/a100: 1
-              cpu: "8"
-              memory: 48Gi
-              ephemeral-storage: 20Gi
+              cpu: "2"
+              memory: 32Gi
+              ephemeral-storage: 10Gi
           volumeMounts:
             - name: data
               mountPath: /data
