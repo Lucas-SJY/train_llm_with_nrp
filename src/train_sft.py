@@ -137,6 +137,19 @@ def main() -> None:
     )
     model.config.use_cache = False  # incompatible with gradient checkpointing
 
+    report_to = [x.strip() for x in args.report_to.split(",") if x.strip()]
+    if "wandb" in report_to:
+        # Without a key, wandb blocks on an interactive login prompt that a batch Job
+        # can never answer -- the pod would just sit there burning a GPU. Fail loudly.
+        mode = os.environ.get("WANDB_MODE", "online")
+        if mode == "online" and not os.environ.get("WANDB_API_KEY"):
+            raise SystemExit(
+                "REPORT_TO=wandb but WANDB_API_KEY is not set. Put your key from "
+                "https://wandb.ai/authorize into .env, or set WANDB_MODE=offline to log "
+                "locally and sync later."
+            )
+        print(f"[wandb] mode={mode} project={os.environ.get('WANDB_PROJECT', '(default)')}")
+
     training_args = TrainingArguments(
         output_dir=args.output_dir,
         per_device_train_batch_size=args.micro_batch_size,
@@ -159,7 +172,9 @@ def main() -> None:
         deepspeed=args.deepspeed,
         dataloader_num_workers=args.num_workers,
         remove_unused_columns=False,
-        report_to=[x for x in args.report_to.split(",") if x],
+        report_to=report_to,
+        # Without this the run shows up in wandb under the full output path.
+        run_name=os.path.basename(args.output_dir.rstrip("/")),
         seed=args.seed,
         ddp_timeout=3600,
     )

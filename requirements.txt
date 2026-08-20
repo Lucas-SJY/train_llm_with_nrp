@@ -6,3 +6,5 @@ datasets>=3.0.0
 accelerate>=1.0.0
 deepspeed>=0.15.0
 sentencepiece>=0.2.0
+# Only imported when REPORT_TO includes "wandb".
+wandb>=0.18
