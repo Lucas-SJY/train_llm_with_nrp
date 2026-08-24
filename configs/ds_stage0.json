@@ -1,0 +1,15 @@
+{
+  "_comment": "Plain data parallel, nothing sharded or offloaded. Fits models up to roughly 2.5B on a 48G card. Point DEEPSPEED_CONFIG at this file for small models; ds.json is the ZeRO-2 + CPU offload config needed for 8B.",
+  "bf16": {
+    "enabled": "auto"
+  },
+  "zero_optimization": {
+    "stage": 0
+  },
+  "gradient_accumulation_steps": "auto",
+  "gradient_clipping": "auto",
+  "train_batch_size": "auto",
+  "train_micro_batch_size_per_gpu": "auto",
+  "steps_per_print": 50,
+  "wall_clock_breakdown": false
+}

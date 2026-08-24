@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s \"https://datasets-server.huggingface.co/rows?dataset=HuggingFaceH4/MATH-500&config=default&split=test&offset=0&length=3\")",
+      "Bash(/opt/anaconda3/envs/k8s-train/bin/python -c ' *)"
+    ]
+  }
+}

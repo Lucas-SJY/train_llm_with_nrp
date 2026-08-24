@@ -11,7 +11,10 @@ spec:
   containers:
     - name: shell
       image: alpine:3.20
-      command: ["sh", "-c", "sleep 14400"]   # exits after 4h, never use sleep infinity
+      # Exits after 6h, never use sleep infinity. Pulling a 16G model over the
+      # API-server-forwarded stream can take a couple of hours, so 4h was cutting it
+      # close; delete the pod as soon as the transfer is done.
+      command: ["sh", "-c", "sleep 21600"]
       resources:
         requests: {cpu: "1", memory: 2Gi}
         limits: {cpu: "2", memory: 4Gi}

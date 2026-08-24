@@ -30,6 +30,20 @@ spec:
       # lives in the UCSD Ceph cluster, so a pod in us-central mounts it over the WAN
       # and writes checkpoints more slowly -- an acceptable trade for not queueing
       # behind the us-west A100s, which are usually all busy.
+      #
+      # 40GB A100s are excluded: with ZeRO-2 offload an 8B model still keeps bf16
+      # weights (16.4G) and gradients (16.4G) resident, which leaves no room for
+      # activations on a 40G card.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: nvidia.com/gpu.product
+                    operator: In
+                    values:
+                      - NVIDIA-A100-SXM4-80GB
+                      - NVIDIA-A100-80GB-PCIe
       containers:
         - name: trainer
           # Placeholder: run.sh substitutes IMAGE from .env before applying.
@@ -39,22 +53,26 @@ spec:
           envFrom:
             - secretRef:
                 name: sft-env
-          # Kept deliberately small so the pod fits wherever an A100 happens to be
-          # free: asking for 8 cpu was enough to be rejected by nodes that had a card
-          # available. The GPU is the bottleneck, not the host. HF cache and
-          # checkpoints go to the PVC, so container-local storage stays tiny.
+          # Sized for 8B with ZeRO-2 optimizer offload. The host, not the GPU, holds
+          # the optimizer: fp32 master weights + Adam m + Adam v = ~98G, plus an fp32
+          # gradient buffer (~33G). 160Gi looked like enough headroom and got
+          # OOMKilled at the first optimizer step -- pinned allocations peak higher
+          # than the steady-state figure, and the safetensors page cache counts
+          # against the same cgroup. 240Gi leaves real slack. The Adam step itself runs on the CPU, and
+          # DeepSpeedCPUAdam scales with cores, so cpu trades optimizer speed against
+          # how easily the pod schedules.
           # NRP policy: the cpu limit/request ratio may not exceed 1.2, and GPU
           # requests and limits must be equal. Keeping everything equal is simplest.
           resources:
             requests:
               nvidia.com/a100: 1
-              cpu: "2"
-              memory: 32Gi
+              cpu: "4"
+              memory: 340Gi
               ephemeral-storage: 10Gi
             limits:
               nvidia.com/a100: 1
-              cpu: "2"
-              memory: 32Gi
+              cpu: "4"
+              memory: 340Gi
               ephemeral-storage: 10Gi
           volumeMounts:
             - name: data

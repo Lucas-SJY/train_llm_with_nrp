@@ -45,6 +45,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--grad-accum", type=int, default=env("GRAD_ACCUM", 32))
     p.add_argument("--warmup-ratio", type=float, default=env("WARMUP_RATIO", 0.03),
                    help="fraction of total steps spent warming up, e.g. 0.03")
+    p.add_argument("--weight-decay", type=float, default=env("WEIGHT_DECAY", 0.0))
     p.add_argument("--logging-steps", type=int, default=env("LOGGING_STEPS", 10))
     p.add_argument("--save-steps", type=int, default=env("SAVE_STEPS", 500))
     p.add_argument("--save-total-limit", type=int, default=env("SAVE_TOTAL_LIMIT", 2))
@@ -53,6 +54,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--report-to", default=env("REPORT_TO", ""), help='e.g. "wandb", empty disables logging')
     p.add_argument("--resume", default=env("RESUME", "auto"), choices=["auto", "no"],
                    help="auto: continue from a checkpoint in --output-dir if one exists; no: ignore it")
+    p.add_argument("--save-only-model", default=env("SAVE_ONLY_MODEL", "true"), choices=["true", "false"],
+                   help="true: checkpoints hold weights only (~16G for 8B) instead of weights plus "
+                        "optimizer state (~115G), which is what repeatedly OOMKilled this job on a "
+                        "cross-region PVC. Resume then restarts the optimizer instead of restoring it.")
     # The deepspeed launcher appends this to the script's argv; accept it silently.
     p.add_argument("--local_rank", type=int, default=-1, help=argparse.SUPPRESS)
     return p.parse_args()
@@ -156,6 +161,7 @@ def main() -> None:
         gradient_accumulation_steps=args.grad_accum,
         num_train_epochs=args.epochs,
         learning_rate=args.lr,
+        weight_decay=args.weight_decay,
         lr_scheduler_type="cosine",
         # transformers v5 dropped warmup_ratio: warmup_steps now takes either an
         # int (exact steps) or a float in [0, 1) meaning a fraction of total steps.
@@ -167,6 +173,7 @@ def main() -> None:
         save_strategy="steps",
         save_steps=args.save_steps,
         save_total_limit=args.save_total_limit,
+        save_only_model=args.save_only_model == "true",
         eval_strategy="epoch" if args.eval_file else "no",
         per_device_eval_batch_size=args.micro_batch_size,
         deepspeed=args.deepspeed,
@@ -190,10 +197,19 @@ def main() -> None:
     # Resuming matters on NRP, where a pod can be evicted mid-run, but it must be
     # loud: a checkpoint whose global_step already equals max_steps makes train()
     # return instantly with train_loss 0, which reads like a broken run.
-    ckpts = sorted(
-        (d for d in os.listdir(args.output_dir) if d.startswith("checkpoint-")),
-        key=lambda d: int(d.split("-")[-1]),
-    ) if os.path.isdir(args.output_dir) else []
+    # A checkpoint that was interrupted mid-write leaves its directory behind without
+    # trainer_state.json. Picking the highest-numbered directory blindly then crashes
+    # with FileNotFoundError, so only completed checkpoints count.
+    ckpts = []
+    if os.path.isdir(args.output_dir):
+        for d in os.listdir(args.output_dir):
+            if not d.startswith("checkpoint-"):
+                continue
+            if os.path.isfile(os.path.join(args.output_dir, d, "trainer_state.json")):
+                ckpts.append(d)
+            else:
+                print(f"[resume] skipping {d}: no trainer_state.json, the save never finished")
+        ckpts.sort(key=lambda d: int(d.split("-")[-1]))
     if args.resume == "no":
         resume = False
         if ckpts:
