@@ -1,0 +1,79 @@
+# MATH-500 evaluation Job.
+#
+# Do not apply this by hand -- evaluate/run_eval.sh renders ${IMAGE} and creates the
+# eval-code ConfigMap this file mounts.
+#
+# The eval script is mounted from a ConfigMap rather than baked into an image, so the
+# training image is reused untouched and no rebuild is needed. Everything the script
+# imports (torch, transformers, datasets, sympy) is already in that image.
+#
+# Inference is far lighter than training: no optimizer, no offload, so 32Gi of host
+# memory is plenty and any A100 will do -- 40GB fits 16.4G of bf16 weights plus KV
+# cache. That makes this job much easier to schedule than the training one.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: qwen-eval
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 604800
+  template:
+    spec:
+      restartPolicy: Never
+      imagePullSecrets:
+        - name: nrp-registry
+      containers:
+        - name: evaluator
+          image: ${IMAGE}
+          imagePullPolicy: Always
+          command: ["python", "/eval/eval_math500.py"]
+          envFrom:
+            # Reuses the training Secret for HF_TOKEN / HF_HOME / HF_DATASETS_CACHE.
+            # EVAL_* below win over anything training-specific in there.
+            - secretRef:
+                name: sft-env
+          env:
+            - name: EVAL_MODEL
+              value: /data/runs/qwen3-8b-sft
+            - name: EVAL_DATASET
+              value: HuggingFaceH4/MATH-500
+            - name: EVAL_OUTPUT_DIR
+              value: /data/eval
+            - name: EVAL_BATCH_SIZE
+              value: "16"
+            - name: EVAL_MAX_NEW_TOKENS
+              value: "2048"
+            - name: EVAL_TEMPERATURE
+              value: "0"
+            # Set to a small number for a smoke test, 0 runs all 500.
+            - name: EVAL_LIMIT
+              value: "0"
+          resources:
+            requests:
+              nvidia.com/a100: 1
+              cpu: "4"
+              memory: 32Gi
+              ephemeral-storage: 10Gi
+            limits:
+              nvidia.com/a100: 1
+              cpu: "4"
+              memory: 32Gi
+              ephemeral-storage: 10Gi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: eval-code
+              mountPath: /eval
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: qwen-sft-data
+        - name: eval-code
+          configMap:
+            name: eval-code
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
