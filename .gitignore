@@ -5,6 +5,8 @@ outputs/
 runs/
 *.jsonl
 *.zip
+bespoke-v2_copy/
+data2/
 
 # ---- Python ----
 __pycache__/
