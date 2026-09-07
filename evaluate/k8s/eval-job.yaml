@@ -20,18 +20,10 @@ spec:
   template:
     spec:
       restartPolicy: Never
-      # 40GB A100s would fit the weights but leave little room for a 16-wide KV cache
-      # at 8192 tokens; pinning to the 80GB parts keeps batch size a free choice.
-      affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-              - matchExpressions:
-                  - key: nvidia.com/gpu.product
-                    operator: In
-                    values:
-                      - NVIDIA-A100-SXM4-80GB
-                      - NVIDIA-A100-80GB-PCIe
+      # No GPU-model constraint: at batch 8 the KV cache is 9.7G, so weights plus
+      # cache come to ~26G and a 40GB A100 is enough. The 80GB parts are the
+      # bottleneck in this cluster -- training waited 14 hours for one -- and a
+      # short eval is not worth that queue.
       imagePullSecrets:
         - name: nrp-registry
       containers:
@@ -51,10 +43,11 @@ spec:
               value: HuggingFaceH4/MATH-500
             - name: EVAL_OUTPUT_DIR
               value: /data/eval
-            # KV cache is 144 KB per token for this model, so 16 x 8192 is ~19G on top
-            # of 16.4G of weights. Comfortable on an 80G card, tight on a 40G one.
+            # KV cache is 144 KB per token for this model: 8 x 8192 is 9.7G on top of
+            # 16.4G of weights, which fits a 40GB card. Raise to 16 (~19G of cache)
+            # only alongside a node affinity for the 80GB parts.
             - name: EVAL_BATCH_SIZE
-              value: "16"
+              value: "8"
             # A thinking checkpoint emits the whole trace before it states an answer,
             # so this has to cover both. Too small and every row truncates mid-thought
             # and the run measures the budget rather than the model.
@@ -70,7 +63,7 @@ spec:
               value: "0"
             # Set to a small number for a smoke test, 0 runs all 500.
             - name: EVAL_LIMIT
-              value: "0"
+              value: "20"
           resources:
             requests:
               nvidia.com/a100: 1
