@@ -20,10 +20,14 @@ spec:
   template:
     spec:
       restartPolicy: Never
-      # No GPU-model constraint: at batch 8 the KV cache is 9.7G, so weights plus
-      # cache come to ~26G and a 40GB A100 is enough. The 80GB parts are the
-      # bottleneck in this cluster -- training waited 14 hours for one -- and a
-      # short eval is not worth that queue.
+      # Inference does not need an A100. At batch 8 the KV cache is 9.7G, so weights
+      # plus cache come to ~26G, which an RTX A6000 (47G) holds comfortably -- and
+      # there are 33 of those against a heavily contended A100 pool that kept training
+      # waiting 14 hours.
+      #
+      # The 56 V100s are the largest pool but unusable here: Volta predates bf16, and
+      # the script loads the model in bf16. Any replacement card has to be Ampere or
+      # newer (A6000, A40, L40/L40S).
       imagePullSecrets:
         - name: nrp-registry
       containers:
@@ -66,12 +70,12 @@ spec:
               value: "20"
           resources:
             requests:
-              nvidia.com/a100: 1
+              nvidia.com/rtxa6000: 1
               cpu: "4"
               memory: 32Gi
               ephemeral-storage: 10Gi
             limits:
-              nvidia.com/a100: 1
+              nvidia.com/rtxa6000: 1
               cpu: "4"
               memory: 32Gi
               ephemeral-storage: 10Gi
