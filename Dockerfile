@@ -20,6 +20,8 @@ COPY src/ src/
 # The training data (tens of MB) is baked into the image, which saves one copy
 # step to the PVC. Switch to a PVC mount once the dataset grows; see README.
 COPY data/ data/
+COPY data_labeled/ data_labeled/
+COPY data_labeled_2/ data_labeled_2/
 
 RUN chmod +x src/entrypoint.sh
 

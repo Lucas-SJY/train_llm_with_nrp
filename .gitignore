@@ -7,6 +7,10 @@ runs/
 *.zip
 bespoke-v2_copy/
 data2/
+qwen3-8b-sft*/
+data_labeled*/
+data_baseline/
+eval-results/
 
 # ---- Python ----
 __pycache__/
@@ -31,3 +35,4 @@ wandb/
 .DS_Store
 kubeconfig
 *.local.yaml
+sample_002738.json

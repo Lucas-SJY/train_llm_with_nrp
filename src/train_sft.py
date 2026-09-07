@@ -54,6 +54,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--report-to", default=env("REPORT_TO", ""), help='e.g. "wandb", empty disables logging')
     p.add_argument("--resume", default=env("RESUME", "auto"), choices=["auto", "no"],
                    help="auto: continue from a checkpoint in --output-dir if one exists; no: ignore it")
+    p.add_argument("--enable-thinking", default=env("ENABLE_THINKING", "auto"),
+                   choices=["auto", "true", "false"],
+                   help="how to render the generation prompt. Targets that already open with "
+                        "<think> need this on, or the template prepends a second, empty think "
+                        "block and the sequence is malformed. auto decides from the data")
     p.add_argument("--save-only-model", default=env("SAVE_ONLY_MODEL", "true"), choices=["true", "false"],
                    help="true: checkpoints hold weights only (~16G for 8B) instead of weights plus "
                         "optimizer state (~115G), which is what repeatedly OOMKilled this job on a "
@@ -63,7 +68,7 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def build_encoder(tokenizer, max_seq_len: int):
+def build_encoder(tokenizer, max_seq_len: int, enable_thinking: bool):
     """Encode one messages record into input_ids/labels, masking the prompt with -100."""
 
     def encode(example):
@@ -71,11 +76,16 @@ def build_encoder(tokenizer, max_seq_len: int):
         prompt_messages = [m for m in messages if m["role"] != "assistant"]
         answer = messages[-1]["content"]
 
+        # enable_thinking=False makes the template prefill an empty <think></think>;
+        # leaving it at the default keeps the prompt at "<|im_start|>assistant\n" so a
+        # target that opens its own <think> block lands exactly where the template
+        # would have put it. Templates that do not know the flag ignore it.
+        kwargs = {} if enable_thinking else {"enable_thinking": False}
         prompt = tokenizer.apply_chat_template(
             prompt_messages,
             tokenize=False,
             add_generation_prompt=True,
-            enable_thinking=False,  # ignored by templates that do not know this flag
+            **kwargs,
         )
         prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
         answer_ids = tokenizer(answer, add_special_tokens=False)["input_ids"]
@@ -123,7 +133,16 @@ def main() -> None:
         data_files["validation"] = args.eval_file
     raw = load_dataset("json", data_files=data_files)
 
-    encode = build_encoder(tokenizer, args.max_seq_len)
+    if args.enable_thinking == "auto":
+        first_target = raw["train"][0]["messages"][-1]["content"].lstrip()
+        enable_thinking = first_target.startswith("<think>")
+        print(f"[think] auto-detected enable_thinking={enable_thinking} "
+              f"(targets {'open their own <think> block' if enable_thinking else 'are plain reasoning'})")
+    else:
+        enable_thinking = args.enable_thinking == "true"
+        print(f"[think] enable_thinking={enable_thinking} (set explicitly)")
+
+    encode = build_encoder(tokenizer, args.max_seq_len, enable_thinking)
     tokenized = raw.map(encode, remove_columns=raw["train"].column_names, num_proc=args.num_workers)
     # Records that are all -100 (prompt alone fills max_seq_len) produce no gradient.
     tokenized = tokenized.filter(lambda ex: any(x != -100 for x in ex["labels"]))

@@ -51,9 +51,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--run-name", default=env("EVAL_RUN_NAME", ""), help="defaults to the model directory name")
     p.add_argument("--limit", type=int, default=env("EVAL_LIMIT", 0), help="only the first N problems, 0 means all")
     p.add_argument("--batch-size", type=int, default=env("EVAL_BATCH_SIZE", 16))
-    p.add_argument("--max-new-tokens", type=int, default=env("EVAL_MAX_NEW_TOKENS", 2048))
+    p.add_argument("--max-new-tokens", type=int, default=env("EVAL_MAX_NEW_TOKENS", 8192),
+                   help="a thinking model emits the whole trace before the answer, so this "
+                        "has to cover both or every run truncates mid-thought")
     p.add_argument("--temperature", type=float, default=env("EVAL_TEMPERATURE", 0.0),
                    help="0 means greedy, which keeps the run reproducible")
+    p.add_argument("--enable-thinking", default=env("EVAL_ENABLE_THINKING", "true"),
+                   choices=["true", "false"],
+                   help="true leaves the template at its default, so the prompt ends at "
+                        "'<|im_start|>assistant' and the model opens its own <think> block -- "
+                        "what a model trained on thinking-turn data expects. false prefills an "
+                        "empty <think></think>, which is right only for models trained that way")
     p.add_argument("--seed", type=int, default=env("SEED", 42))
     return p.parse_args()
 
@@ -128,6 +136,19 @@ def to_number(s: str):
         return None
 
 
+def split_answer(text: str) -> tuple[str, str, bool]:
+    """Split a completion into (thought, answer, closed).
+
+    Scoring must look only at what the model states after it closes its thought. The
+    thought itself routinely contains a \\boxed{} -- the trace's own working -- and
+    counting that would credit a run that never actually committed to an answer.
+    """
+    if "</think>" in text:
+        thought, _, answer = text.partition("</think>")
+        return thought, answer, True
+    return text, "", False
+
+
 def is_correct(pred: str | None, gold: str) -> bool:
     if pred is None:
         return False
@@ -173,10 +194,13 @@ def main() -> None:
         data = data.select(range(min(args.limit, len(data))))
     print(f"[eval] problems   : {len(data)}", flush=True)
 
+    enable_thinking = args.enable_thinking == "true"
+    template_kwargs = {} if enable_thinking else {"enable_thinking": False}
+    print(f"[eval] thinking   : {enable_thinking}", flush=True)
     prompts = [
         tokenizer.apply_chat_template(
             [{"role": "user", "content": f"{INSTRUCTION} {row['problem']}"}],
-            tokenize=False, add_generation_prompt=True, enable_thinking=False,
+            tokenize=False, add_generation_prompt=True, **template_kwargs,
         )
         for row in data
     ]
@@ -200,13 +224,25 @@ def main() -> None:
             row = data[start + j]
             keep = seq[seq != tokenizer.pad_token_id]
             text = tokenizer.decode(keep, skip_special_tokens=True)
-            pred = extract_boxed(text)
+
+            # A thinking model writes the answer after </think>; the thought itself often
+            # contains a \boxed{} too. Score the stated answer, not the scratch work, so a
+            # run that never closes its thought is counted as the format failure it is.
+            thought, answer_part, closed = split_answer(text)
+            n_think = (len(tokenizer(thought, add_special_tokens=False)["input_ids"])
+                       if closed else int(keep.numel()))
+            pred = extract_boxed(answer_part) if answer_part.strip() else None
+
             ok = is_correct(pred, row["answer"])
             n_correct += ok
             records.append({
                 "unique_id": row["unique_id"], "subject": row["subject"], "level": row["level"],
                 "gold": row["answer"], "pred": pred, "correct": bool(ok),
-                "completion_tokens": int(keep.numel()), "completion": text,
+                "completion_tokens": int(keep.numel()),
+                "thinking_tokens": n_think,
+                "answer_tokens": int(keep.numel()) - n_think,
+                "closed_think": closed,
+                "completion": text,
             })
 
         done = start + len(batch_prompts)
@@ -232,11 +268,15 @@ def main() -> None:
         "completion_tokens_max": toks[-1] if toks else 0,
         "truncated": sum(r["completion_tokens"] >= args.max_new_tokens for r in records),
         "no_boxed_answer": sum(r["pred"] is None for r in records),
+        "never_closed_think": sum(not r["closed_think"] for r in records),
+        "thinking_tokens_mean": sum(r["thinking_tokens"] for r in records) / len(records) if records else 0,
+        "answer_tokens_mean": sum(r["answer_tokens"] for r in records) / len(records) if records else 0,
         "accuracy_by_level": {k: sum(v) / len(v) for k, v in sorted(by_level.items())},
         "accuracy_by_subject": {k: sum(v) / len(v) for k, v in sorted(by_subject.items())},
         "minutes": (time.time() - started) / 60,
         "max_new_tokens": args.max_new_tokens,
         "temperature": args.temperature,
+        "enable_thinking": enable_thinking,
     }
 
     with (out_dir / "predictions.jsonl").open("w") as f:
@@ -246,7 +286,8 @@ def main() -> None:
 
     print("\n[eval] ==== summary ====")
     for k in ("n", "accuracy", "completion_tokens_mean", "completion_tokens_median",
-              "truncated", "no_boxed_answer", "minutes"):
+              "thinking_tokens_mean", "answer_tokens_mean",
+              "truncated", "no_boxed_answer", "never_closed_think", "minutes"):
         print(f"  {k:26s} {summary[k]}")
     print(f"  accuracy_by_level          {summary['accuracy_by_level']}")
     print(f"[eval] wrote {out_dir}/summary.json and predictions.jsonl")

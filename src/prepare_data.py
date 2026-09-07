@@ -8,10 +8,14 @@ built from the same source, and comparing models trained on them is the experime
     --label-format none      target = the reasoning text, plain          (baseline)
     --label-format bracket   target = every span prefixed by its label   (treatment)
 
-With bracket format the user turn also carries an instruction naming the label
-vocabulary, so the model is told which tags to emit rather than having to guess.
-The instruction always lists exactly the labels that survive --drop-labels, so the
-prompt can never ask for a tag the targets do not contain.
+    --think-format none      target = the reasoning only, rendered with enable_thinking=False
+    --think-format think     target = <think>reasoning</think> + the reference solution,
+                             which is what Qwen3's own template expects of a thinking turn
+
+--user-instruction labels appends a sentence naming the label vocabulary to the user
+turn. It defaults to none: the user turn stays the bare question, so the prompt is
+exactly what the stock Qwen3 template produces and evaluation needs no special
+casing. The listed tags always match what survives --drop-labels.
 
 --drop-labels removes span types entirely; leave it empty (the default) to keep the
 full trace. Dropping and label output are independent: dropping changes what the
@@ -51,11 +55,19 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output-dir", default="data", help="where train.jsonl / val.jsonl are written")
     p.add_argument("--label-format", default="none", choices=["none", "bracket"],
                    help="none: plain text (baseline); bracket: '[label] text' per span")
+    p.add_argument("--user-instruction", default="none", choices=["none", "labels"],
+                   help="labels: append a sentence naming the label vocabulary to the user turn. "
+                        "Default none keeps the user turn as the bare question, which is what the "
+                        "stock Qwen3 template renders and what the eval prompt should mirror")
+    p.add_argument("--think-format", default="none", choices=["none", "think"],
+                   help="think: put the trace inside <think></think> and answer with the reference "
+                        "solution, matching Qwen3's native thinking turn")
     p.add_argument("--drop-labels", default="", help="comma-separated span labels to drop, empty keeps all")
     p.add_argument("--val-ratio", type=float, default=0.02, help="fraction held out for validation")
     p.add_argument("--max-samples", type=int, default=0, help="only take the first N files, 0 means all")
     p.add_argument("--min-target-tokens", type=int, default=32, help="drop samples whose target is too short")
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--no-card", action="store_true", help="skip writing the dataset card")
     return p.parse_args()
 
 
@@ -79,7 +91,7 @@ def read_spans(sample: dict) -> list[dict]:
     return out
 
 
-def build_example(sample: dict, drop: set[str], label_format: str, instruction: str):
+def build_example(sample: dict, drop: set[str], label_format: str, think_format: str, instruction: str):
     """Return (messages example, original token count, kept token count), or None."""
     question = (sample.get("question") or "").strip()
     spans = read_spans(sample)
@@ -105,9 +117,21 @@ def build_example(sample: dict, drop: set[str], label_format: str, instruction: 
         pieces = [f"[{s['label']}] {s['text'].strip()}" for s in kept]
     else:
         pieces = [s["text"].strip() for s in kept]
-    target = "\n\n".join(pieces).strip()
-    if not target:
+    reasoning = "\n\n".join(pieces).strip()
+    if not reasoning:
         return None
+
+    if think_format == "think":
+        # Qwen3 renders a thinking turn as <think>\n{reasoning}\n</think>\n\n{content}; putting
+        # the tags in the content lets the template split them back out on its own. The reference
+        # solution becomes the post-think answer, so the model learns to close the thought and
+        # then state a clean \boxed{} result -- something a third of the raw traces never do.
+        solution = (sample.get("solution") or "").strip()
+        if not solution:
+            return None
+        target = f"<think>\n{reasoning}\n</think>\n\n{solution}"
+    else:
+        target = reasoning
 
     user_content = f"{question}\n\n{instruction}" if instruction else question
 
@@ -118,12 +142,80 @@ def build_example(sample: dict, drop: set[str], label_format: str, instruction: 
 
     example = {
         "id": sample.get("id") or sample.get("example_id"),
+        "answer": sample.get("answer"),
         "messages": [
             {"role": "user", "content": user_content},
             {"role": "assistant", "content": target},
         ],
     }
     return example, total_tokens, kept_tokens
+
+
+def write_card(out_dir: Path, args, kept_labels, n_train, n_val, ratio, instruction) -> None:
+    """Emit a dataset card so the directory is a self-describing HF dataset."""
+    front = [
+        "---",
+        "license: apache-2.0",
+        "task_categories:",
+        "  - text-generation",
+        "language:",
+        "  - en",
+        "tags:",
+        "  - chain-of-thought",
+        "  - reasoning",
+        "  - sft",
+        "configs:",
+        "  - config_name: default",
+        "    data_files:",
+        "      - split: train",
+        "        path: train.jsonl",
+        "      - split: validation",
+        "        path: validation.jsonl",
+        "---",
+        "",
+    ]
+    body = f"""# bespoke-v2 labelled reasoning SFT set
+
+Built from DeepSeek-R1 traces in `bespoke-v2`, where every reasoning span carries one
+of eight annotation labels. Generated by `src/prepare_data.py`.
+
+## Format
+
+Chat-style records ready for `apply_chat_template`:
+
+| field | meaning |
+|---|---|
+| `id` | source sample id |
+| `answer` | reference final answer, the `\\boxed{{}}` content |
+| `messages` | one user turn and one assistant turn |
+
+Label format `{args.label_format}`, think format `{args.think_format}`.
+Dropped labels: {sorted({x for x in ALL_LABELS if x not in kept_labels}) or "none"}.
+Labels present in the targets: {kept_labels}.
+
+Split sizes: train {n_train}, validation {n_val}. Reasoning tokens kept: {ratio:.1%}.
+
+## Assistant turn
+
+The assistant content embeds the reasoning inside `<think>` tags, which is what the
+Qwen3 chat template expects of a thinking turn: it splits the tags back out and
+re-renders them as `<think>\\n{{reasoning}}\\n</think>\\n\\n{{answer}}`. The text after
+`</think>` is the reference solution, so the model learns to close the thought and
+then state a clean `\\boxed{{}}` result.
+
+Because the assistant turn already carries its own `<think>` block, render prompts
+with the template default (`enable_thinking=True`). Passing `enable_thinking=False`
+prepends a second, empty think block and corrupts the sequence.
+""" if args.think_format == "think" else f"""# bespoke-v2 labelled reasoning SFT set
+
+Built from DeepSeek-R1 traces in `bespoke-v2`. Generated by `src/prepare_data.py`.
+
+Label format `{args.label_format}`. Split sizes: train {n_train}, validation {n_val}.
+Reasoning tokens kept: {ratio:.1%}. Render prompts with `enable_thinking=False`.
+"""
+    if instruction:
+        body += f"\n## Instruction appended to every user turn\n\n```\n{instruction}\n```\n"
+    (out_dir / "README.md").write_text("\n".join(front) + body)
 
 
 def main() -> None:
@@ -136,7 +228,7 @@ def main() -> None:
 
     kept_labels = [l for l in ALL_LABELS if l not in drop]
     instruction = ""
-    if args.label_format == "bracket":
+    if args.user_instruction == "labels":
         instruction = INSTRUCTION_TEMPLATE.format(tags=", ".join(f"[{l}]" for l in kept_labels))
 
     files = sorted(Path(args.input_dir).glob("sample_*.json"))
@@ -152,7 +244,7 @@ def main() -> None:
         except json.JSONDecodeError:
             skipped += 1
             continue
-        built = build_example(sample, drop, args.label_format, instruction)
+        built = build_example(sample, drop, args.label_format, args.think_format, instruction)
         if built is None:
             skipped += 1
             continue
@@ -170,7 +262,7 @@ def main() -> None:
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    for name, rows in (("train", train), ("val", val)):
+    for name, rows in (("train", train), ("validation", val)):
         if not rows:
             continue
         with (out_dir / f"{name}.jsonl").open("w") as f:
@@ -178,9 +270,13 @@ def main() -> None:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     ratio = kept_total / orig_total if orig_total else 0.0
+    if not args.no_card:
+        write_card(out_dir, args, kept_labels, len(train), len(val), ratio, instruction)
+
     print(f"input files    : {len(files)} ({skipped} skipped)")
     print(f"train / val    : {len(train)} / {len(val)}  -> {out_dir}/")
-    print(f"label format   : {args.label_format}")
+    print(f"label format   : {args.label_format}   think format: {args.think_format}")
+    print(f"user turn      : {'question + label instruction' if instruction else 'bare question (stock template)'}")
     print(f"dropped labels : {sorted(drop) or '(none, full trace kept)'}")
     print(f"labels in target: {len(kept_labels)} -> {kept_labels}")
     print(f"tokens kept    : {ratio:.1%} ({kept_total:,} / {orig_total:,})"

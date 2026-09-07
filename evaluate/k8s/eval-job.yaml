@@ -20,6 +20,18 @@ spec:
   template:
     spec:
       restartPolicy: Never
+      # 40GB A100s would fit the weights but leave little room for a 16-wide KV cache
+      # at 8192 tokens; pinning to the 80GB parts keeps batch size a free choice.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: nvidia.com/gpu.product
+                    operator: In
+                    values:
+                      - NVIDIA-A100-SXM4-80GB
+                      - NVIDIA-A100-80GB-PCIe
       imagePullSecrets:
         - name: nrp-registry
       containers:
@@ -34,15 +46,26 @@ spec:
                 name: sft-env
           env:
             - name: EVAL_MODEL
-              value: /data/runs/qwen3-8b-sft
+              value: /data/runs/qwen3-8b-sft-v3
             - name: EVAL_DATASET
               value: HuggingFaceH4/MATH-500
             - name: EVAL_OUTPUT_DIR
               value: /data/eval
+            # KV cache is 144 KB per token for this model, so 16 x 8192 is ~19G on top
+            # of 16.4G of weights. Comfortable on an 80G card, tight on a 40G one.
             - name: EVAL_BATCH_SIZE
               value: "16"
+            # A thinking checkpoint emits the whole trace before it states an answer,
+            # so this has to cover both. Too small and every row truncates mid-thought
+            # and the run measures the budget rather than the model.
             - name: EVAL_MAX_NEW_TOKENS
-              value: "2048"
+              value: "8192"
+            # Must match how the checkpoint was trained: true for v3 (the target opens
+            # its own <think>), false for v1 and v2 (trained with an empty block
+            # prefilled). Getting it wrong does not error, it silently evaluates a
+            # prompt the model never saw.
+            - name: EVAL_ENABLE_THINKING
+              value: "true"
             - name: EVAL_TEMPERATURE
               value: "0"
             # Set to a small number for a smoke test, 0 runs all 500.
