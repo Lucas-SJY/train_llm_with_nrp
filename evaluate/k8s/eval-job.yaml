@@ -47,16 +47,20 @@ spec:
               value: HuggingFaceH4/MATH-500
             - name: EVAL_OUTPUT_DIR
               value: /data/eval
-            # KV cache is 144 KB per token for this model: 8 x 8192 is 9.7G on top of
-            # 16.4G of weights, which fits a 40GB card. Raise to 16 (~19G of cache)
-            # only alongside a node affinity for the 80GB parts.
+            # KV cache is 144 KB per token, so at 12288 each sequence costs 1.77G.
+            # 12 x 1.77 = 21.2G of cache on top of 16.4G of weights is ~39G, which an
+            # A6000 (49G) holds with room to spare. 16 would need 46G and leave no
+            # margin for workspace, so this is as wide as this card goes at this length.
             - name: EVAL_BATCH_SIZE
-              value: "8"
-            # A thinking checkpoint emits the whole trace before it states an answer,
-            # so this has to cover both. Too small and every row truncates mid-thought
-            # and the run measures the budget rather than the model.
+              value: "12"
+            # Matches the training window (MAX_SEQ_LEN 12288). MATH-500 prompts are
+            # short -- 66 tokens at the median, 807 at the longest -- so the generation
+            # budget is effectively the same length the model was trained to produce.
+            # Beyond this the model is generating in a range it never saw, and
+            # never_closed_think stops meaning "budget too small" and starts meaning
+            # "this trace genuinely does not terminate".
             - name: EVAL_MAX_NEW_TOKENS
-              value: "8192"
+              value: "12288"
             # Must match how the checkpoint was trained: true for v3 (the target opens
             # its own <think>), false for v1 and v2 (trained with an empty block
             # prefilled). Getting it wrong does not error, it silently evaluates a
@@ -67,7 +71,7 @@ spec:
               value: "0"
             # Set to a small number for a smoke test, 0 runs all 500.
             - name: EVAL_LIMIT
-              value: "20"
+              value: "0"
           resources:
             requests:
               nvidia.com/rtxa6000: 1
