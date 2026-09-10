@@ -2,32 +2,37 @@
 
 A minimal, working example of full-parameter SFT on [NRP Nautilus](https://nrp.ai):
 one Kubernetes Job, one node, one GPU, plain `transformers` + DeepSpeed. No Kubeflow
-operator, no ZeRO sharding -- the DeepSpeed config is stage 0, so DeepSpeed only wraps
-the training loop and the single GPU holds the whole model.
+operator and no sharding -- with a single GPU there is nothing to shard across. What
+DeepSpeed is here for is **CPU offload of the optimizer state**, which is what lets an
+8B model train on one card at all.
 
 The data lives in `bespoke-v2/`: each sample is a DeepSeek-R1 reasoning trace cut into
-spans, and every span carries a label (`logical_deduction` / `reflecting` /
-`verifying` / ...). This repo turns it into a **context-compression** SFT task:
+spans, and every span carries one of eight labels (`logical_deduction` / `reflecting` /
+`verifying` / ...). `prepare_data.py` turns that into an SFT target, and which target it
+builds is the experiment:
 
 ```
-input  = question
-output = the reasoning trace with the redundant labels removed
+--label-format bracket --think-format think      <- the shipped configuration
+    input  = the bare question
+    output = <think> [label] step ... </think> + the reference solution
+
+--drop-labels "reflecting,verifying,..."          <- the compression variant
+    output = the trace with those span types deleted
 ```
 
-By default it drops `planning_next_step,restating_problem,reflecting,verifying`, which
-keeps **56%** of the tokens (4.71M / 8.41M over 5144 samples). That objective is only a
-placeholder default -- to try a different compression policy, change `--drop-labels` or
-edit `build_example` in [prepare_data.py](src/prepare_data.py).
+The shipped `TRAIN_FILE` is `data_labeled_2/`, which keeps **all eight labels** and drops
+nothing; the label tags are markup, not compression. Passing `--drop-labels` instead
+produces the compressed target that the earlier checkpoints were trained on.
 
 ## Layout
 
 ```
 .
 ├── src/
-│   ├── prepare_data.py     # bespoke-v2/*.json -> data/{train,val}.jsonl
+│   ├── prepare_data.py     # bespoke-v2/*.json -> <out>/{train,validation}.jsonl
 │   ├── train_sft.py        # HF Trainer + DeepSpeed, loss on the assistant turn only
 │   └── entrypoint.sh       # loads .env, then `deepspeed --num_gpus=1`
-├── configs/ds.json         # DeepSpeed, ZeRO stage 0
+├── configs/ds.json         # DeepSpeed, ZeRO-2 + CPU optimizer offload
 ├── run.sh                  # one-command pipeline: data -> image -> secrets -> job -> logs
 ├── .env.example            # every setting and key; copy to .env (gitignored)
 ├── k8s/
@@ -80,7 +85,7 @@ Set it explicitly only for a deploy token, whose user is the token name.
 ### Individual steps
 
 ```bash
-./run.sh data       # rebuild data/{train,val}.jsonl only
+./run.sh data       # rebuild the jsonl dataset only
 ./run.sh image      # docker login + build + push
 ./run.sh secrets    # re-upload .env as the sft-env Secret, refresh the pull secret
 ./run.sh submit     # (re)submit the Job, substituting ${IMAGE} into the manifest
@@ -102,11 +107,11 @@ image layer.
 
 ### Retrieve the weights
 
-Checkpoints land in `/data/runs/qwen-sft` on the PVC:
+Checkpoints land in `OUTPUT_DIR` on the PVC (`/data/runs/qwen3-8b-sft-v3` as shipped):
 
 ```bash
 kubectl apply -f k8s/data-shell.yaml
-kubectl cp data-shell:/data/runs/qwen-sft ./qwen-sft
+kubectl cp data-shell:/data/runs/qwen3-8b-sft-v3 ./qwen3-8b-sft-v3
 kubectl delete pod data-shell               # delete as soon as you are done
 ./run.sh clean
 ```
@@ -138,8 +143,10 @@ from `envFrom`. Reading the environment inside Python sidesteps it entirely.
 `configs/ds.json` is as small as a DeepSpeed config gets: bf16 on,
 `zero_optimization.stage: 0`, and every batch-size field left as `auto` so accelerate
 fills them in from the CLI flags. On a single GPU the ZeRO stages have nothing to shard
-across, so stage 0 is the right setting; the only lever DeepSpeed still offers for a
-larger model is CPU offload (see below).
+across, so sharding buys nothing here -- what `configs/ds.json` is actually for is
+**stage 2 with the optimizer state offloaded to host memory**, which is the only reason
+an 8B model fits at all. `configs/ds_stage0.json` is the plain data-parallel config kept
+for models small enough not to need offload.
 
 The launcher is `deepspeed --num_gpus=1`, called from `src/entrypoint.sh`. It exists to
 set up the one-process distributed group that DeepSpeed initialisation expects; running
@@ -147,24 +154,29 @@ set up the one-process distributed group that DeepSpeed initialisation expects; 
 
 ### Model size
 
-This is the real constraint of one GPU without sharding: **that GPU stores the full
-model, the full gradients and the full Adam state**. For bf16 training with an fp32 Adam
-master copy that is roughly `16 bytes x parameter count`, before activations:
+Without offload, one GPU stores the full model, the full gradients and the full Adam
+state -- roughly `16 bytes x parameter count` for bf16 training with an fp32 Adam master
+copy, before activations:
 
-| Model | GPU memory needed | A40 (48G) | A100 (80G) |
+| Model | GPU memory, no offload | A40 (48G) | A100 (80G) |
 |---|---|---|---|
 | Qwen3-0.6B | ~10GB | yes | yes |
-| Qwen3-1.7B | ~27GB | yes -- the default | yes |
+| Qwen3-1.7B | ~27GB | yes | yes |
 | Qwen3-4B | ~64GB | no | yes |
-| Qwen3-8B | ~128GB | no | no |
+| Qwen3-8B | ~131GB | no | no |
 
-To go past that on a single GPU, cheapest to most invasive:
+**The current configuration is Qwen3-8B, which is the bottom row.** It runs because
+`configs/ds.json` offloads the ~98GB of optimizer state to host memory, leaving 33GB of
+weights and gradients on the card -- measured peak was 62.9GB of an 80GB A100 at
+sequence length 12,288. That is why `k8s/job.yaml` requests 340Gi of pod memory.
+
+Other ways past the limit on a single GPU, cheapest to most invasive:
 
 1. **LoRA / QLoRA** -- only adapter weights get optimizer state, so 8B fits on one A40.
    Needs `peft` in `requirements.txt` and a few lines in `train_sft.py`.
-2. **ZeRO-2 with CPU offload** -- set `"stage": 2` in `configs/ds.json` and add
-   `"offload_optimizer": {"device": "cpu"}`. This moves the Adam state to host RAM, so
-   raise the pod `memory` request accordingly (~12 bytes per parameter). Slower per step.
+2. **ZeRO-3 with parameter offload as well** -- add
+   `"offload_param": {"device": "cpu"}` on top of the optimizer offload. Cuts resident
+   GPU memory to a few GB, at the cost of moving weights across PCIe every step.
 3. **More GPUs** -- put the GPU count in `k8s/job.yaml`, switch the entrypoint back to
    `deepspeed --num_gpus=N`, and use ZeRO-3 to shard across them. That is what the
    Kubeflow PyTorchJob route existed for; for one GPU it is pure overhead.
@@ -189,12 +201,27 @@ Check what your namespace may use with `kubectl describe resourcequota`.
 ### Hyperparameters
 
 All of them live in `.env`; run `python3 src/train_sft.py --help` for the full list and
-the matching variable names. Defaults: lr 1e-5 with cosine decay, 2 epochs, micro-bs 1
-x grad-accum 32 on 1 GPU = global batch 32, checkpoint every 500 steps. Set
-`REPORT_TO=wandb` plus `WANDB_API_KEY` to log a run.
+the matching variable names. The shipped configuration is the one that produced
+`qwen3-8b-sft-v3`:
 
-On OOM, lower `--max-seq-len` first (4096 -> 2048; most samples in this dataset are
-under 3k tokens), then pick a smaller model or one of the three options above.
+| variable | value | note |
+|---|---|---|
+| `MODEL_NAME` | `Qwen/Qwen3-8B` | |
+| `EPOCHS` | `1` | 5,042 samples at global batch 64 is 79 steps |
+| `LEARNING_RATE` | `1e-5` | cosine decay |
+| `WARMUP_RATIO` | `0.03` | float, so `warmup_steps` reads it as a fraction |
+| `WEIGHT_DECAY` | `0.0` | |
+| `MICRO_BATCH_SIZE` × `GRAD_ACCUM` | `1` × `64` | global batch 64 |
+| `MAX_SEQ_LEN` | `12288` | leaves 6.5 % of targets truncated |
+| `SAVE_STEPS` / `SAVE_TOTAL_LIMIT` | `40` / `1` | one mid-run checkpoint |
+| `SAVE_ONLY_MODEL` | `true` | 16G per checkpoint instead of 115G |
+| `SEED` | `42` | pinned, not left to the code default |
+
+Set `REPORT_TO=wandb` plus `WANDB_API_KEY` to log a run.
+
+On OOM, lower `MAX_SEQ_LEN` first -- the median training target is 2,436 tokens, so
+8192 costs only a couple more points of truncation. After that, add
+`offload_param` to `configs/ds.json`, or pick a smaller model.
 
 ## NRP rules worth knowing
 

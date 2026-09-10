@@ -173,11 +173,11 @@ All set as env vars in `k8s/eval-job.yaml`, all also accepted as CLI flags:
 
 | var | default | note |
 |---|---|---|
-| `EVAL_MODEL` | `/data/runs/qwen3-8b-sft` | path on the PVC or an HF repo id |
+| `EVAL_MODEL` | `/data/runs/qwen3-8b-sft-v3` | path on the PVC or an HF repo id |
 | `EVAL_ENABLE_THINKING` | `true` | must match how the checkpoint was trained |
 | `EVAL_LIMIT` | `0` | set to e.g. `20` for a smoke test |
-| `EVAL_BATCH_SIZE` | `16` | lower it if generation OOMs |
-| `EVAL_MAX_NEW_TOKENS` | `8192` | a thinking model needs room for the trace *and* the answer |
+| `EVAL_BATCH_SIZE` | `6` | KV cache is 144 KB/token; 12 OOMed 13 hours into a run |
+| `EVAL_MAX_NEW_TOKENS` | `12288` | matches the training window; a thinking model needs room for the trace *and* the answer |
 | `EVAL_TEMPERATURE` | `0` | greedy, so the run is reproducible |
 | `EVAL_JUDGE_MODEL` | `qwen3-small` | stage 2 only |
 
@@ -188,7 +188,9 @@ than the model.
 
 ## Resources
 
-One A100, 32Gi of host memory, 4 cpu. Inference needs no optimizer state and no CPU
-offload, so this is far lighter than the training Job and schedules much more easily --
-any A100 will do, including the 40GB ones, since 16.4G of bf16 weights plus KV cache
-fits comfortably. Stage 2 needs no cluster resources at all.
+One RTX A6000, 32Gi of host memory, 4 cpu. Inference needs no optimizer state and no
+CPU offload, so this is far lighter than the training Job. It deliberately does not ask
+for an A100: at batch 6 the KV cache is 10.6G on top of 16.4G of weights, which a 47G
+A6000 holds with room to spare, and the A6000 pool schedules in seconds where the A100
+pool kept training waiting 14 hours. Any Ampere-or-newer card works; the 56 V100s in the
+cluster do not, because Volta predates bf16. Stage 2 needs no cluster resources at all.
