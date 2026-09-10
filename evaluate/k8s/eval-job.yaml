@@ -48,11 +48,12 @@ spec:
             - name: EVAL_OUTPUT_DIR
               value: /data/eval
             # KV cache is 144 KB per token, so at 12288 each sequence costs 1.77G.
-            # 12 x 1.77 = 21.2G of cache on top of 16.4G of weights is ~39G, which an
-            # A6000 (49G) holds with room to spare. 16 would need 46G and leave no
-            # margin for workspace, so this is as wide as this card goes at this length.
+            # 12 looked safe on paper (21.2G of cache + 16.4G of weights = 38G on a 49G
+            # card) and OOMed 13 hours in: the allocator held 8G reserved-but-unusable,
+            # and repeat_kv in GQA attention asks for another 1.2G in one go at the
+            # worst moment. 6 halves the cache to 10.6G and leaves room for both.
             - name: EVAL_BATCH_SIZE
-              value: "12"
+              value: "6"
             # Matches the training window (MAX_SEQ_LEN 12288). MATH-500 prompts are
             # short -- 66 tokens at the median, 807 at the longest -- so the generation
             # budget is effectively the same length the model was trained to produce.
@@ -67,6 +68,12 @@ spec:
             # prompt the model never saw.
             - name: EVAL_ENABLE_THINKING
               value: "true"
+            # torch renamed this and the OOM message still cited the old name, so set
+            # both rather than guess which one this build actually reads.
+            - name: PYTORCH_CUDA_ALLOC_CONF
+              value: expandable_segments:True
+            - name: PYTORCH_ALLOC_CONF
+              value: expandable_segments:True
             - name: EVAL_TEMPERATURE
               value: "0"
             # Set to a small number for a smoke test, 0 runs all 500.
